@@ -119,6 +119,9 @@ impl TlsFixture {
                         let _ = stream.write_all(reply.body.as_bytes()).await;
                     }
                 }
+                // Complete the TLS write side so the client can distinguish
+                // an oversized body from a truncated fixture connection.
+                let _ = stream.shutdown().await;
             }
         });
         Self {
@@ -447,10 +450,11 @@ async fn timeout_and_response_size_are_bounded() {
             chunked,
         }])
         .await;
-        assert!(matches!(
-            large.client().get_node().await,
-            Err(ClientError::ResponseTooLarge)
-        ));
+        let result = large.client().get_node().await;
+        assert!(
+            matches!(&result, Err(ClientError::ResponseTooLarge)),
+            "chunked={chunked}; outcome={result:?}"
+        );
     }
 }
 

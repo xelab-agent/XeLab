@@ -172,6 +172,56 @@ class AuthorizationTests(ConsumerTestCase):
 
 
 class ServiceContractTests(ConsumerTestCase):
+    def test_expired_lease_waits_for_exponential_backoff(self):
+        first = self.deliver()
+        self.service.advance(LEASE_SECONDS)
+        self.assertTrue(self.service.deliver(self.subscription) is None,
+                        "expiry starts the retry delay; it is not an immediate redelivery")
+        self.service.advance(0.99)
+        self.assertIsNone(self.service.deliver(self.subscription))
+        self.service.advance(0.01)
+        second = self.deliver()
+        self.assertEqual(second["attempt"], 2)
+        self.assertNotEqual(first["delivery_id"], second["delivery_id"])
+        self.service.advance(LEASE_SECONDS)
+        self.assertIsNone(self.service.deliver(self.subscription))
+        self.service.advance(1.99)
+        self.assertIsNone(self.service.deliver(self.subscription))
+        self.service.advance(0.01)
+        self.assertEqual(self.deliver()["attempt"], 3)
+
+    def test_expired_lease_jitter_is_chosen_once_and_not_moved_by_polling(self):
+        self.service.jitter_fraction = 0.25
+        self.deliver()
+        self.service.advance(LEASE_SECONDS)
+        self.assertTrue(self.service.deliver(self.subscription) is None,
+                        "expiry must persist a retry deadline")
+        deadline = self.service.subscriptions[self.subscription]["retry_at"]
+        self.assertGreaterEqual(deadline, LEASE_SECONDS + 1)
+        self.assertLessEqual(deadline, LEASE_SECONDS + 1.25)
+        self.service.advance(0.5)
+        self.assertIsNone(self.service.deliver(self.subscription))
+        self.assertEqual(self.service.subscriptions[self.subscription]["retry_at"], deadline)
+        self.service.advance(deadline - self.service.now + 0.001)
+        self.assertEqual(self.deliver()["attempt"], 2)
+
+    def test_late_first_poll_counts_backoff_from_lease_expiry(self):
+        self.deliver()
+        self.service.advance(LEASE_SECONDS + 2)
+        self.assertEqual(self.deliver()["attempt"], 2)
+
+    def test_expiry_at_maximum_attempts_dead_letters_before_next_poll(self):
+        service = FakeEventService(maximum_attempts=1)
+        first_event = service.publish(TOPIC, SECRET_PAYLOAD)
+        next_event = service.publish(TOPIC, SECRET_PAYLOAD)
+        subscription = service.create_subscription(TOPIC)
+        self.assertEqual(service.deliver(subscription)["event"]["id"], first_event["id"])
+        service.advance(LEASE_SECONDS)
+        self.assertTrue(service.deliver(subscription) is None,
+                        "dead lettering and a subsequent delivery take separate polls")
+        self.assertEqual(service.dead_letters[0][1:], (first_event["id"], "maximum_attempts"))
+        self.assertEqual(service.deliver(subscription)["event"]["id"], next_event["id"])
+
     def test_retry_backoff_gates_redelivery(self):
         delivery = self.deliver()
         for attempt, delay in ((1, 1), (2, 2)):
@@ -189,7 +239,9 @@ class ServiceContractTests(ConsumerTestCase):
             self.assertEqual(delivery["attempt"], attempt + 1)
         self.assertEqual(self.service._backoff(4), 8)
         self.assertEqual(self.service._backoff(5), 16)
-        self.assertEqual(self.service._backoff(6), 16)
+        self.assertEqual(self.service._backoff(6), 32)
+        self.assertEqual(self.service._backoff(7), 60)
+        self.assertEqual(self.service._backoff(10), 60)
 
     def test_maximum_attempts_dead_letters_and_advances(self):
         service = FakeEventService(maximum_attempts=3)

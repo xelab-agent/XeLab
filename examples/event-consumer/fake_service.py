@@ -3,7 +3,7 @@
 This is NOT the kernel. It implements only the contract behaviors the example
 depends on: one unacked 30s lease per subscription, redelivery with a new
 delivery_id/lease_token, same-lease re-ack success, expired-lease 409,
-Idempotency-Key replay/conflict, 1/2/4/8/16s backoff and dead letter at
+Idempotency-Key replay/conflict, exponential backoff and dead letter at
 maximum_attempts. The clock is injectable and jitter defaults to zero so runs
 are deterministic; the real platform adds up to 25% jitter (cap 60s).
 """
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from consumer import NotAuthorized, TransportTimeout
 
 LEASE_SECONDS = 30
-BACKOFF_BASE_SECONDS = (1, 2, 4, 8, 16)
+BACKOFF_BASE_SECONDS = (1, 2, 4, 8, 16, 32, 64)
 BACKOFF_CAP_SECONDS = 60
 
 
@@ -83,8 +83,16 @@ class FakeEventService:
             raise NotAuthorized("deliver rejected: credentials revoked")
         sub = self.subscriptions[subscription_id]
         delivery = sub["delivery"]
-        if delivery is not None and self.now < delivery["expires"]:
-            return None
+        if delivery is not None:
+            if self.now < delivery["expires"]:
+                return None
+            if sub["attempt"] >= self.maximum_attempts:
+                self._dead_letter(subscription_id, sub, "maximum_attempts")
+                return None
+            # Record the retry deadline once, measured from lease expiry even
+            # if the first poll is late; this fake only keeps it in memory.
+            sub["delivery"] = None
+            sub["retry_at"] = delivery["expires"] + self._backoff(sub["attempt"])
         if self.now < sub["retry_at"]:
             return None
         topic_events = [e for e in self.events if e["topic"] == sub["topic"]]
@@ -93,7 +101,7 @@ class FakeEventService:
         sub["attempt"] += 1
         if sub["attempt"] > self.maximum_attempts:
             self._dead_letter(subscription_id, sub, "maximum_attempts")
-            return self.deliver(subscription_id)
+            return None
         event = topic_events[sub["cursor"]]
         delivery = {
             "delivery_id": str(uuid.uuid4()),

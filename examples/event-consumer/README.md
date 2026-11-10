@@ -13,7 +13,7 @@
 ## 运行
 
 ```sh
-# 契约测试（18 个用例）
+# 离线契约测试
 python3 -m unittest discover -s examples/event-consumer -p 'test_*.py' -v
 
 # 场景演示（6 个场景，打印逐场景 PASS/FAIL）
@@ -35,13 +35,13 @@ python3 examples/event-consumer/drive.py
 
 模拟与消费者共同覆盖的契约行为（与 docs/api、docs/tasks/events.md 一致）：
 
-- 每个订阅最多一个未确认 delivery，租约 30s；过期后重投生成**新**
-  delivery_id / lease_token，attempt 加一。
+- 每个订阅最多一个未确认 delivery，租约 30s；过期后按从租约到期时刻起算的
+  退避等待重投，生成**新** delivery_id / lease_token，attempt 加一。
 - 同一已 ack 租约重复确认返回 204；过期租约即使未被接管也返回 409。
 - `Idempotency-Key`：同键同请求返回已记录结果；同键不同内容返回
   `409 IDEMPOTENCY_CONFLICT`。传输超时只允许用**原键**重试。
-- retry 按 1/2/4/8/16s 退避（模拟默认零抖动以便确定性测试；真实平台
-  加 ≤25% 抖动、上限 60s）；达到 maximum_attempts 或显式 dead_letter
+- retry 按 1/2/4/8/16/32s 指数退避、上限 60s（模拟默认零抖动以便确定性
+  测试；真实平台加 ≤25% 抖动）；达到 maximum_attempts 或显式 dead_letter
   写死信并推进游标。
 
 消费者侧决策：

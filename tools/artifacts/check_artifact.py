@@ -10,6 +10,7 @@ signature is valid. Exit codes: 0 consistent, 1 inconsistent/unsupported,
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -57,13 +58,41 @@ def strict_json(raw, maximum):
     def constant(token):
         raise CheckError("non-finite JSON number: " + token)
 
+    def floating_number(token):
+        value = float(token)
+        if not math.isfinite(value):
+            raise CheckError("JSON number is outside the finite range")
+        return value
+
+    def integer_number(token):
+        # serde_json represents -0 and integers outside i64/u64 as f64.
+        if token == "-0":
+            return -0.0
+        if len(token.lstrip("-")) <= 20:
+            value = int(token)
+            if -(2 ** 63) <= value <= 2 ** 64 - 1:
+                return value
+        return floating_number(token)
+
     try:
         # decode() consumes only JSON's four whitespace characters on both
         # sides and rejects trailing data, matching the kernel parser.
-        value = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant).decode(text)
+        value = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant,
+                                 parse_int=integer_number, parse_float=floating_number).decode(text)
     except json.JSONDecodeError:
         raise CheckError("invalid JSON syntax") from None
     return value
+
+
+def json_values_equal(left, right):
+    """Keep boolean/integer/float distinctions when comparing JSON values."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(json_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(json_values_equal(a, b) for a, b in zip(left, right))
+    return left == right
 
 
 def safe_components(relative):
@@ -223,10 +252,10 @@ def check_manifest(reader):
                 ok = False
                 continue
             if field:
-                if value != cap.get(field):
+                if not json_values_equal(value, cap.get(field)):
                     errors.append(f"{label}: {relative} differs from signed manifest")
                     ok = False
-            elif not isinstance(value, dict) or value.get("side_effect") != cap.get("side_effect"):
+            elif not isinstance(value, dict) or not json_values_equal(value.get("side_effect"), cap.get("side_effect")):
                 errors.append(f"{label}: contract side effects differ")
                 ok = False
             checks.append(f"{file} {hashlib.sha256(member).hexdigest()}\n")

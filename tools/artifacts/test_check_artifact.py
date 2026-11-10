@@ -1,6 +1,7 @@
 """Offline fixture checks for the read-only artifact consistency preflight."""
 import contextlib
 import gzip
+import hashlib
 import importlib.util
 import io
 import json
@@ -9,7 +10,8 @@ import tarfile
 import tempfile
 import unittest
 
-from check_artifact import build_report, main, render_text
+from check_artifact import (CheckError, CONTRACT_FILES, build_report, json_values_equal,
+                            main, render_text, strict_json)
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLISHER = "00000000-0000-4000-8000-000000000001"
@@ -79,6 +81,51 @@ class ArtifactCase(unittest.TestCase):
 
 
 class ConsistencyTests(ArtifactCase):
+    def test_contract_schema_compares_json_types_like_kernel(self):
+        directory = self.echo()
+        original_manifest = self.manifest(directory)
+        input_path = self.contract_path(directory, "input.schema.json")
+        original_schema = json.loads(input_path.read_bytes())
+        cases = (
+            ("bool_vs_integer", True, 1, "inconsistent"),
+            ("integer_vs_bool", 0, False, "inconsistent"),
+            ("integer_vs_float", 1, 1.0, "inconsistent"),
+            ("same_float", 1.0, 1.0, "consistent"),
+            ("large_integer_is_float_in_kernel", 2 ** 64, float(2 ** 64), "consistent"),
+        )
+        for name, manifest_value, member_value, expected in cases:
+            with self.subTest(name=name):
+                manifest = json.loads(json.dumps(original_manifest))
+                schema = json.loads(json.dumps(original_schema))
+                capability = manifest["capabilities"][0]
+                capability["input_schema"]["properties"]["message"] = {"enum": [manifest_value]}
+                schema["properties"]["message"] = {"enum": [member_value]}
+                input_path.write_text(json.dumps(schema))
+                checks = "".join(f"{file} {hashlib.sha256((input_path.parent / file).read_bytes()).hexdigest()}\n"
+                                 for file in CONTRACT_FILES)
+                digest = "sha256:" + hashlib.sha256(checks.encode()).hexdigest()
+                contract = capability["contract"]
+                contract["schema_digest"] = digest
+                for skill in manifest["skills"]:
+                    reference = skill["target"].get("contract", {})
+                    if (reference.get("name"), reference.get("version")) == (contract["name"], contract["version"]):
+                        reference["schema_digest"] = digest
+                self.write_manifest(directory, manifest)
+                report = build_report(directory)
+                self.assertEqual(report["status"], expected, report["errors"])
+                if expected == "inconsistent":
+                    self.assertTrue(any("differs from signed manifest" in error for error in report["errors"]))
+
+    def test_strict_json_rejects_overflowing_exponent(self):
+        with self.assertRaises(CheckError):
+            strict_json(b"1e400", 1024)
+
+    def test_strict_json_number_representation(self):
+        minus_zero = strict_json(b"-0", 1024)
+        self.assertTrue(json_values_equal(minus_zero, strict_json(b"0.0", 1024)))
+        self.assertFalse(json_values_equal(minus_zero, strict_json(b"0", 1024)))
+        self.assertFalse(json_values_equal(strict_json(b"1", 1024), strict_json(b"1.0", 1024)))
+
     def test_manifest_whitespace_uses_json_grammar(self):
         directory = self.echo()
         member = directory / "xelab/plugin.json"

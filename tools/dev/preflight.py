@@ -90,7 +90,10 @@ def effective_resources(probe):
         cpu = probe.affinity() * 1000
     except OSError:
         cpu = None
-    result = {"memtotal_bytes": memory, "affinity_cpu_millis": cpu, "effective_cpu_millis": cpu, "effective_memory_bytes": memory}
+    # Host totals are observations, not effective cgroup limits. Publish the
+    # latter only after all required membership and ancestor checks succeed.
+    result = {"memtotal_bytes": memory, "affinity_cpu_millis": cpu,
+              "effective_cpu_millis": None, "effective_memory_bytes": None}
     if memory is None or cpu is None:
         return dict(result, state="unknown" if state != "missing" else "unavailable")
     state, content = read_optional(probe, "/proc/self/cgroup")

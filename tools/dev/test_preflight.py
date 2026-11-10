@@ -136,6 +136,29 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(resources["state"], "unknown")
         self.assertIsNone(resources["affinity_cpu_millis"])
 
+    def test_unavailable_cgroup_membership_never_claims_effective_totals(self):
+        for value, expected in ((None, "unavailable"), (PermissionError("restricted"), "unknown"),
+                                ("11:cpu:/user.slice\n", "unavailable"),
+                                ("0::/../../etc\n", "unavailable")):
+            with self.subTest(expected=expected, value=value):
+                probe = healthy()
+                if value is None:
+                    del probe.files["/proc/self/cgroup"]
+                else:
+                    probe.files["/proc/self/cgroup"] = value
+                resources = build_report(probe)["checks"]["resources"]
+                self.assertEqual(resources["state"], expected)
+                self.assertIsNone(resources["effective_cpu_millis"])
+                self.assertIsNone(resources["effective_memory_bytes"])
+                self.assertEqual(resources["affinity_cpu_millis"], 8000)
+                self.assertEqual(resources["memtotal_bytes"], 32768000 * 1024)
+
+    def test_missing_affinity_does_not_claim_effective_memory(self):
+        resources = build_report(healthy(affinity_error=True))["checks"]["resources"]
+        self.assertEqual(resources["state"], "unknown")
+        self.assertIsNone(resources["effective_cpu_millis"])
+        self.assertIsNone(resources["effective_memory_bytes"])
+
     def test_cgroup_path_escape_is_unavailable(self):
         probe = healthy()
         probe.files["/proc/self/cgroup"] = "0::/../../etc\n"

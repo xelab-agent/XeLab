@@ -107,6 +107,204 @@ fn delivery_id(delivery: &Value) -> Uuid {
     delivery["delivery_id"].as_str().unwrap().parse().unwrap()
 }
 
+async fn research_encode_delivery(
+    message: crate::rpc::EventDelivery,
+    limit: usize,
+) -> (bool, String) {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use prost::Message;
+    let input = crate::rpc::SubscribeRequest::default().encode_to_vec();
+    let mut framed = vec![0];
+    framed.extend_from_slice(&(input.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&input);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/xelab.v1.HostService/Subscribe")
+        .header("content-type", "application/grpc")
+        .body(Body::from(framed))
+        .unwrap();
+    let service = tower::service_fn(move |_: tonic::Request<crate::rpc::SubscribeRequest>| {
+        let item = message.clone();
+        async move { Ok::<_, tonic::Status>(tonic::Response::new(tokio_stream::once(Ok(item)))) }
+    });
+    let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::<
+        crate::rpc::EventDelivery,
+        crate::rpc::SubscribeRequest,
+    >::default())
+    .max_encoding_message_size(limit);
+    let mut body = grpc.server_streaming(service, request).await.into_body();
+    let first = body.frame().await.unwrap().unwrap();
+    let had_data = first.is_data();
+    let trailers = if had_data {
+        body.frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap()
+    } else {
+        first.into_trailers().unwrap()
+    };
+    let status = trailers
+        .get("grpc-status")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    (had_data, status)
+}
+
+#[tokio::test]
+async fn research_compact_event_normalization_can_exceed_host_stream_limit() {
+    use axum::{body::Body, extract::ConnectInfo, http::Request};
+    use prost::Message;
+    use tower::ServiceExt;
+
+    let mut f = EventFixture::new()
+        .await
+        .expect("isolated PostgreSQL is required");
+    let app = std::sync::Arc::get_mut(&mut f.base.app).expect("fixture must be uniquely owned");
+    let mut config = app.config.value.clone();
+    config["resources"]["profile"] = json!("compact");
+    app.config = crate::config::Config::from_value(config).unwrap();
+    let rpc_limit = app.config.rpc_limit(16_777_216 + 65_536);
+    assert_eq!(rpc_limit, 327_680);
+
+    let c = f.base.app.db.connect().await.unwrap();
+    let installation: Uuid = c
+        .query_one(
+            "SELECT id FROM installations WHERE plugin_id='org.xelab.backup-fixture'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let schema = json!({"type":"array","items":{"type":"number"}});
+    let digest = contracts::digest(&serde_json::to_vec(&schema).unwrap());
+    let manifest = json!({"plugin_id":"org.xelab.backup-fixture","event_topics":[{"topic":f.topic,"version":"1.0.0","payload_schema":schema,"schema_digest":digest}]});
+    validate_manifest(&manifest).unwrap();
+    c.execute(
+        "UPDATE installations SET manifest=$2 WHERE id=$1",
+        &[&installation, &manifest],
+    )
+    .await
+    .unwrap();
+    c.execute(
+        "UPDATE event_contracts SET schema_digest=$2,payload_schema=$3 WHERE topic=$1",
+        &[&f.topic, &digest, &schema],
+    )
+    .await
+    .unwrap();
+    let subscription = f.subscription("latest", 1).await;
+
+    let payload = format!("[{}]", vec!["9e9"; 60_000].join(","));
+    let raw_body = format!("{{\"topic\":\"{}\",\"version\":\"1.0.0\",\"payload\":{},\"dedupe_key\":\"compact-fixture\"}}", f.topic, payload);
+    assert!(raw_body.len() < 256 * 1024);
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/platform/v1/events")
+        .header(
+            "host",
+            crate::plugin_http_gateway::core_authority(&f.base.app.config).unwrap(),
+        )
+        .header("authorization", format!("Bearer {}", f.base.token))
+        .header("idempotency-key", "compact-fixture")
+        .header("content-type", "application/json")
+        .body(Body::from(raw_body.clone()))
+        .unwrap();
+    request.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:50400".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = crate::api::router(f.base.app.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        201,
+        "compact HTTP publication should be accepted"
+    );
+    drop(response);
+
+    let leased = f
+        .next(subscription)
+        .await
+        .expect("published event should be leased");
+    let event = &leased["event"];
+    let payload_json = serde_json::to_vec(&event["payload"]).unwrap();
+    let message = crate::rpc::EventDelivery {
+        delivery_id: leased["delivery_id"].as_str().unwrap().into(),
+        event_id: event["id"].as_str().unwrap().into(),
+        topic: event["topic"].as_str().unwrap().into(),
+        version: event["version"].as_str().unwrap().into(),
+        payload_json,
+        attempt: leased["attempt"].as_u64().unwrap() as u32,
+        lease_token: leased["lease_token"].as_str().unwrap().into(),
+        lease_expires_unix_ms: chrono::DateTime::parse_from_rfc3339(
+            leased["lease_expires_at"].as_str().unwrap(),
+        )
+        .unwrap()
+        .timestamp_millis(),
+    };
+    let encoded_len = message.encoded_len();
+    assert!(encoded_len > rpc_limit);
+    let stored = c
+        .query_one(
+            "SELECT state,attempt FROM event_deliveries WHERE id=$1",
+            &[&message.delivery_id.parse::<Uuid>().unwrap()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, String>("state"), "leased");
+    assert_eq!(stored.get::<_, i32>("attempt"), 1);
+
+    // Exercise the same Tonic streaming encoder and cap as HostService. A
+    // small control is delivered, while the committed large item fails first.
+    let mut small = message.clone();
+    small.payload_json = b"[1]".to_vec();
+    assert_eq!(
+        research_encode_delivery(small, rpc_limit).await,
+        (true, "0".to_owned())
+    );
+    assert_eq!(
+        research_encode_delivery(message, rpc_limit).await,
+        (false, "11".to_owned())
+    );
+
+    // With one allowed attempt, wait for the real PostgreSQL lease timeout;
+    // the next normal poll dead-letters it without any consumer receiving it.
+    let started = tokio::time::Instant::now();
+    loop {
+        let expired: bool = c
+            .query_one(
+                "SELECT clock_timestamp() >= lease_expires_at FROM event_deliveries WHERE id=$1",
+                &[&delivery_id(&leased)],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if expired {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(45),
+            "database lease did not expire within the bounded wait"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    assert!(f.next(subscription).await.is_none());
+    let final_row = c.query_one("SELECT d.state, d.outcome, (SELECT count(*) FROM event_dead_letters l WHERE l.delivery_id=d.id), (SELECT cursor FROM subscriptions WHERE id=$2)=d.event_id FROM event_deliveries d WHERE d.id=$1", &[&delivery_id(&leased), &subscription]).await.unwrap();
+    assert_eq!(final_row.get::<_, String>(0), "dead_letter");
+    assert_eq!(
+        final_row.get::<_, Option<String>>(1).as_deref(),
+        Some("dead_letter")
+    );
+    assert_eq!(final_row.get::<_, i64>(2), 1);
+    assert!(final_row.get::<_, bool>(3));
+    println!("http_request_bytes={}, host_grpc_message_bytes={}, host_grpc_limit={}, grpc_status=11, persisted_lease_attempt=1, dead_letters=1, cursor_advanced=true", raw_body.len(), encoded_len, rpc_limit);
+}
+
 #[tokio::test]
 async fn actual_postgres_event_dedupe_is_durable_concurrent_and_schema_checked() {
     let Some(f) = EventFixture::new().await else {

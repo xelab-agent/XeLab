@@ -79,6 +79,34 @@ class ArtifactCase(unittest.TestCase):
 
 
 class ConsistencyTests(ArtifactCase):
+    def test_manifest_whitespace_uses_json_grammar(self):
+        directory = self.echo()
+        member = directory / "xelab/plugin.json"
+        original = member.read_bytes()
+        for name, raw, expected in (
+            ("leading", b" \t\r\n" + original, "consistent"),
+            ("trailing", original + b" \t\r\n", "consistent"),
+            ("non_json_trailing", original + "\u00a0".encode(), "inconsistent"),
+        ):
+            with self.subTest(name=name):
+                member.write_bytes(raw)
+                self.assertEqual(build_report(directory)["status"], expected)
+
+    def test_unhashable_skill_contract_reference_produces_json_report(self):
+        directory = self.echo()
+        original = self.manifest(directory)
+        for field in ("name", "version"):
+            for invalid in ([], {}):
+                with self.subTest(field=field, invalid=invalid):
+                    manifest = json.loads(json.dumps(original))
+                    manifest["skills"][0]["target"]["contract"][field] = invalid
+                    self.write_manifest(directory, manifest)
+                    code, output = run_main(directory, "--json")
+                    report = json.loads(output)
+                    self.assertEqual((code, report["status"]), (1, "inconsistent"))
+                    self.assertTrue(any("unknown or drifted capability contract" in error
+                                        for error in report["errors"]))
+
     def test_echo_rust_directory_is_consistent(self):
         report = build_report(self.echo())
         self.assertEqual(report["status"], "consistent")

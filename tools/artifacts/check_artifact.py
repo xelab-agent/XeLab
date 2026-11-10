@@ -58,11 +58,11 @@ def strict_json(raw, maximum):
         raise CheckError("non-finite JSON number: " + token)
 
     try:
-        value, end = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant).raw_decode(text)
+        # decode() consumes only JSON's four whitespace characters on both
+        # sides and rejects trailing data, matching the kernel parser.
+        value = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant).decode(text)
     except json.JSONDecodeError:
         raise CheckError("invalid JSON syntax") from None
-    if text[end:].strip():
-        raise CheckError("trailing content after JSON value")
     return value
 
 
@@ -254,7 +254,10 @@ def check_manifest(reader):
         kind = target.get("kind")
         if kind == "capability":
             reference = target.get("contract")
-            key = (reference.get("name"), reference.get("version")) if isinstance(reference, dict) else None
+            key = ((reference["name"], reference["version"])
+                   if isinstance(reference, dict)
+                   and isinstance(reference.get("name"), str)
+                   and isinstance(reference.get("version"), str) else None)
             if key not in contracts or contracts[key] != reference.get("schema_digest"):
                 errors.append(f"skills[{index}] references an unknown or drifted capability contract")
         elif kind == "http":

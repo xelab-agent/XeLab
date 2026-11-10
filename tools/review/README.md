@@ -12,6 +12,8 @@
 - 仅读取本机 `GITHUB_TOKEN`（公开仓库可匿名）；不输出、记录或提交 Token，
   报告不含 PR/Review 正文、标题等不可信文本，重定向时拒绝转发凭证。
 - 读不到分支保护/必需检查配置时标记 `unknown`，绝不猜测；GraphQL 线程读取失败同样标 `unknown`。
+- Review 明细保留所有记录；批准计数按每位审查者最新的批准、要求修改或撤销意见统计，
+  普通评论不撤销意见。该计数不判断审查者是否符合保护规则或其他合并条件。
 - Actions workflow runs 按 `head_sha` 精确查询并逐条核对；403/404（Actions 不可读或未启用）
   记为 `workflow_runs_state=unknown` 并只用 check runs/statuses 判定，其他错误直接停止。
 - `merge_authorization` 恒为 `not-assessed`：检查完成不等于获准合并，合并由维护者按真实门禁决定。

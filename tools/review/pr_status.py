@@ -172,8 +172,14 @@ def build_report(api, number):
         workflows, workflow_state = [], "unknown"
     workflows.sort(key=lambda w: (w["name"], w["url"]))
     reviews = [{"user": r["user"]["login"], "state": r["state"], "commit_id": r.get("commit_id"), "submitted_at": r.get("submitted_at")} for r in pages(api, f"/pulls/{number}/reviews")]
+    # GitHub returns reviews chronologically. A later opinion from the same
+    # reviewer supersedes the prior one; comments do not revoke an opinion.
+    latest_opinion = {}
+    for review in reviews:
+        if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
+            latest_opinion[review["user"].casefold()] = review
     reviews.sort(key=lambda r: (r["submitted_at"] or "", r["user"], r["state"], r["commit_id"] or ""))
-    approvals = [r for r in reviews if r["state"] == "APPROVED"]
+    approvals = [r for r in latest_opinion.values() if r["state"] == "APPROVED"]
     return {
         "schema": SCHEMA,
         "repository": api.repo,

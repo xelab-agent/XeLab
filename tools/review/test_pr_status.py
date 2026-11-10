@@ -109,6 +109,35 @@ def call_main(api, *extra):
 
 
 class ReportTests(unittest.TestCase):
+    def test_approvals_count_reviewers_not_historical_events(self):
+        api = FakeAPI(reviews=[
+            review(user="Alice", submitted_at="2026-11-10T00:00:00Z"),
+            review(user="alice", submitted_at="2026-11-10T00:01:00Z"),
+        ])
+        reviews = build_report(api, 1)["reviews"]
+        self.assertEqual(reviews["total"], 2)
+        self.assertEqual(reviews["approvals_on_head"], 1)
+
+    def test_later_changes_request_replaces_approval_but_comment_does_not(self):
+        approved = review(user="reviewer", submitted_at="2026-11-10T00:00:00Z")
+        comment = review(state="COMMENTED", user="reviewer", submitted_at="2026-11-10T00:01:00Z")
+        changed = review(state="CHANGES_REQUESTED", user="reviewer", submitted_at="2026-11-10T00:02:00Z")
+        self.assertEqual(build_report(FakeAPI(reviews=[approved, comment]), 1)["reviews"]["approvals_on_head"], 1)
+        self.assertEqual(build_report(FakeAPI(reviews=[approved, comment, changed]), 1)["reviews"]["approvals_on_head"], 0)
+
+    def test_new_approval_replaces_same_reviewers_older_approval(self):
+        old = review(commit_id=OLD, user="reviewer", submitted_at="2026-11-10T00:00:00Z")
+        current = review(user="reviewer", submitted_at="2026-11-10T00:01:00Z")
+        result = build_report(FakeAPI(reviews=[old, current]), 1)["reviews"]
+        self.assertEqual((result["approvals_on_head"], result["approvals_on_older_commits"]), (1, 0))
+
+    def test_dismissed_review_removes_approval_and_pending_does_not(self):
+        approved = review(user="reviewer", submitted_at="2026-11-10T00:00:00Z")
+        dismissed = review(state="DISMISSED", user="reviewer", submitted_at="2026-11-10T00:01:00Z")
+        pending = review(state="PENDING", user="reviewer", submitted_at=None)
+        self.assertEqual(build_report(FakeAPI(reviews=[approved, pending]), 1)["reviews"]["approvals_on_head"], 1)
+        self.assertEqual(build_report(FakeAPI(reviews=[approved, dismissed]), 1)["reviews"]["approvals_on_head"], 0)
+
     def test_evidence_binds_to_exact_head(self):
         api = FakeAPI(runs=[run()], reviews=[review()])
         report = build_report(api, 1)

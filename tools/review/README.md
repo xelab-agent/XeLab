@@ -14,6 +14,9 @@
 - 读不到分支保护/必需检查配置时标记 `unknown`，绝不猜测；GraphQL 线程读取失败同样标 `unknown`。
 - Actions workflow runs 按 `head_sha` 精确查询并逐条核对；403/404（Actions 不可读或未启用）
   记为 `workflow_runs_state=unknown` 并只用 check runs/statuses 判定，其他错误直接停止。
+- REST 读取请求使用 `no-cache` 和每次不同的查询标记；收集结束后再次读取 PR，若 head、
+  base、状态或 Draft 状态已变化则不输出报告并要求重试。这降低过期缓存与并发更新的风险，
+  但多个 API 读取并非原子快照，报告输出后状态仍可能变化，合并前须再次核对实际门禁。
 - `merge_authorization` 恒为 `not-assessed`：检查完成不等于获准合并，合并由维护者按真实门禁决定。
 - 退出码只表示报告是否生成：0 = 已生成（无论检查通过与否），1 = API/输入错误。
 

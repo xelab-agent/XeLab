@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -35,10 +36,12 @@ class GitHub:
         self.opener = build_opener(NoRedirect())
 
     def request(self, path):
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Cache-Control": "no-cache"}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
-        with self.opener.open(Request(self.base + path, headers=headers, method="GET"), timeout=30) as response:
+        separator = "&" if "?" in path else "?"
+        url = self.base + path + separator + "xelab_observed=" + uuid.uuid4().hex
+        with self.opener.open(Request(url, headers=headers, method="GET"), timeout=30) as response:
             return json.load(response)
 
     def graphql(self, query, variables):
@@ -155,6 +158,10 @@ def review_threads(api, number):
 
 def build_report(api, number):
     pr = api.request(f"/pulls/{number}")
+    def identity(value):
+        return (value["head"]["sha"], value["head"]["ref"], value["base"]["sha"],
+                value["base"]["ref"], value["state"], value["draft"])
+    initial_identity = identity(pr)
     head_sha = pr["head"]["sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("unexpected head SHA from GitHub")
@@ -174,6 +181,10 @@ def build_report(api, number):
     reviews = [{"user": r["user"]["login"], "state": r["state"], "commit_id": r.get("commit_id"), "submitted_at": r.get("submitted_at")} for r in pages(api, f"/pulls/{number}/reviews")]
     reviews.sort(key=lambda r: (r["submitted_at"] or "", r["user"], r["state"], r["commit_id"] or ""))
     approvals = [r for r in reviews if r["state"] == "APPROVED"]
+    required = required_checks(api, pr["base"]["ref"], runs, statuses, workflows)
+    threads = review_threads(api, number)
+    if identity(api.request(f"/pulls/{number}")) != initial_identity:
+        raise ValueError("pull request changed during evidence collection; retry")
     return {
         "schema": SCHEMA,
         "repository": api.repo,
@@ -193,14 +204,14 @@ def build_report(api, number):
             "commit_statuses": statuses,
             "workflow_runs": workflows,
         },
-        "required_checks": required_checks(api, pr["base"]["ref"], runs, statuses, workflows),
+        "required_checks": required,
         "reviews": {
             "total": len(reviews),
             "approvals_on_head": sum(1 for r in approvals if r["commit_id"] == head_sha),
             "approvals_on_older_commits": sum(1 for r in approvals if r["commit_id"] != head_sha),
             "entries": reviews,
         },
-        "review_threads": review_threads(api, number),
+        "review_threads": threads,
         "merge_authorization": "not-assessed",
         "note": "Completed checks are not merge approval; maintainers decide against the real gates.",
     }

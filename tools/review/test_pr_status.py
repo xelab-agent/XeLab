@@ -7,6 +7,7 @@ import os
 import unittest
 from unittest import mock
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 import pr_status
@@ -109,6 +110,65 @@ def call_main(api, *extra):
 
 
 class ReportTests(unittest.TestCase):
+    def test_head_or_base_change_during_collection_aborts_without_report(self):
+        for field in ("head_sha", "head_ref", "base_sha", "base_ref", "state", "draft"):
+            with self.subTest(field=field):
+                class ChangingAPI(FakeAPI):
+                    pulls_read = 0
+
+                    def request(self, path):
+                        if path == "/pulls/1":
+                            self.pulls_read += 1
+                            return copy.deepcopy(super().request(path))
+                        return super().request(path)
+
+                    def graphql(self, query, variables):
+                        result = super().graphql(query, variables)
+                        # The change happens after head-bound checks were read,
+                        # regardless of whether the implementation rechecks PR.
+                        if field == "head_sha":
+                            self.pull["head"]["sha"] = OLD
+                        elif field == "head_ref":
+                            self.pull["head"]["ref"] = "renamed-feature"
+                        elif field == "base_sha":
+                            self.pull["base"]["sha"] = OLD
+                        elif field == "base_ref":
+                            self.pull["base"]["ref"] = "other-base"
+                        elif field == "state":
+                            self.pull["state"] = "closed"
+                        else:
+                            self.pull["draft"] = True
+                        return result
+
+                api = ChangingAPI(runs=[run()], reviews=[review()], threads=lambda cursor: ([], None))
+                code, out, err = call_main(api, "--json")
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("pull request changed", err)
+                self.assertEqual(api.pulls_read, 2)
+
+    def test_rest_reads_request_revalidation_and_distinct_cache_keys(self):
+        api = GitHub("example/project", SECRET)
+        requests = []
+
+        def open_response(request, timeout):
+            requests.append(request)
+            return io.BytesIO(b"{}")
+
+        with mock.patch.object(api.opener, "open", side_effect=open_response):
+            api.request("/pulls/1")
+            api.request("/pulls/1")
+            api.request("/commits/abc/check-runs?per_page=100&page=1")
+        self.assertEqual(len(requests), 3)
+        cache_keys = []
+        for request in requests:
+            self.assertEqual(request.get_method(), "GET")
+            self.assertEqual(request.get_header("Cache-control"), "no-cache")
+            self.assertNotIn(SECRET, request.full_url)
+            query = parse_qs(urlsplit(request.full_url).query)
+            cache_keys.append(query["xelab_observed"][0])
+        self.assertEqual(len(set(cache_keys)), 3)
+        self.assertIn("per_page=100&page=1&", requests[2].full_url)
+
     def test_evidence_binds_to_exact_head(self):
         api = FakeAPI(runs=[run()], reviews=[review()])
         report = build_report(api, 1)

@@ -16,6 +16,7 @@ BUILD_BINARIES = ("cargo", "rustc")
 OPTIONAL_BINARIES = ("psql",)
 DEFAULT_SOCKET = "/run/containerd/containerd.sock"
 NOTE = ("Read-only diagnostic for local development. Socket detection is not execution capability; "
+        "resource limits are visible-hierarchy upper bounds, and hidden ancestors may be tighter. "
         "RUN-03, AWS and production acceptance are tracked separately and never claimed here.")
 
 
@@ -90,10 +91,11 @@ def effective_resources(probe):
         cpu = probe.affinity() * 1000
     except OSError:
         cpu = None
-    # Host totals are observations, not effective cgroup limits. Publish the
-    # latter only after all required membership and ancestor checks succeed.
+    # Host totals are observations, not effective cgroup limits. Even after
+    # visible checks, cgroup namespaces can hide more restrictive ancestors.
     result = {"memtotal_bytes": memory, "affinity_cpu_millis": cpu,
-              "effective_cpu_millis": None, "effective_memory_bytes": None}
+              "effective_cpu_millis": None, "effective_memory_bytes": None,
+              "limit_scope": "visible-hierarchy-upper-bound"}
     if memory is None or cpu is None:
         return dict(result, state="unknown" if state != "missing" else "unavailable")
     state, content = read_optional(probe, "/proc/self/cgroup")
@@ -109,18 +111,35 @@ def effective_resources(probe):
     for ancestor in [current, *current.parents]:
         if not ancestor.is_relative_to(CGROUP_ROOT):
             break
+        marker, _ = read_optional(probe, ancestor / "cgroup.controllers")
+        if marker != "ok":
+            unknown = True
+
+        def missing_limit_is_unknown(controller):
+            # The hierarchy root normally has no resource-control files. A
+            # child can also lack one when its parent disabled that controller.
+            if ancestor == CGROUP_ROOT:
+                return False
+            parent_state, enabled = read_optional(probe, ancestor.parent / "cgroup.subtree_control")
+            return parent_state != "ok" or controller in enabled.split()
+
         state, content = read_optional(probe, ancestor / "cpu.max")
-        if state == "unknown":
+        if state == "unknown" or (state == "missing" and missing_limit_is_unknown("cpu")):
             unknown = True
         elif state == "ok":
             quota, period = content.split()
             if quota != "max":
                 cpu = min(cpu, int(quota) * 1000 // int(period))
         state, content = read_optional(probe, ancestor / "memory.max")
-        if state == "unknown":
+        if state == "unknown" or (state == "missing" and missing_limit_is_unknown("memory")):
             unknown = True
         elif state == "ok" and content.strip() != "max":
             memory = min(memory, int(content))
+    final_state, final_content = read_optional(probe, "/proc/self/cgroup")
+    final_relative = (next((line[3:] for line in final_content.splitlines() if line.startswith("0::")), None)
+                      if final_state == "ok" else None)
+    if final_relative != relative:
+        unknown = True
     return dict(result, effective_cpu_millis=None if unknown else cpu, effective_memory_bytes=None if unknown else memory,
                 state="unknown" if unknown else "ok")
 
@@ -170,7 +189,7 @@ def render_text(report):
     for name, check in sorted(report["checks"].items()):
         extra = ""
         if name == "resources":
-            extra = f" (effective cpu={check['effective_cpu_millis']} memory={check['effective_memory_bytes']})"
+            extra = f" (visible cpu upper bound={check['effective_cpu_millis']} memory upper bound={check['effective_memory_bytes']})"
         elif name == "kernel":
             extra = f" ({check['release']})"
         elif name == "containerd_socket" and check["state"] == "detected":

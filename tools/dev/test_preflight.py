@@ -12,6 +12,7 @@ ALL_BINARIES = ("ctr", "runc", "ip", "nft", "cargo", "rustc", "psql")
 CGROUP = "/sys/fs/cgroup"
 MEMINFO = "MemTotal:       32768000 kB\nMemFree:        1000000 kB\n"
 SELF_CGROUP = "0::/user.slice/user-1000.slice/session-3.scope\n"
+MEMBER = CGROUP + "/user.slice/user-1000.slice/session-3.scope"
 
 
 class FakeProbe:
@@ -57,10 +58,12 @@ class FakeProbe:
 
 
 def healthy(**overrides):
+    ancestors = [CGROUP, CGROUP + "/user.slice", CGROUP + "/user.slice/user-1000.slice", MEMBER]
+    files = {path + "/cgroup.controllers": "cpu memory pids io\n" for path in ancestors}
+    files.update({path + "/cgroup.subtree_control": "\n" for path in ancestors[:-1]})
+    files.update({"/proc/meminfo": MEMINFO, "/proc/self/cgroup": SELF_CGROUP})
     defaults = dict(
-        files={CGROUP + "/cgroup.controllers": "cpu memory pids io\n",
-               "/proc/meminfo": MEMINFO,
-               "/proc/self/cgroup": SELF_CGROUP},
+        files=files,
         kinds={"/run/containerd/containerd.sock": "socket"},
     )
     defaults.update(overrides)
@@ -86,6 +89,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(checks["resources"]["state"], "ok")
         self.assertEqual(checks["resources"]["effective_cpu_millis"], 8000)
         self.assertEqual(checks["resources"]["effective_memory_bytes"], 32768000 * 1024)
+        self.assertEqual(checks["resources"]["limit_scope"], "visible-hierarchy-upper-bound")
         self.assertEqual(report["acceptance"], "not-assessed")
         self.assertEqual(sum(report["summary"].values()), len(checks))
 
@@ -114,6 +118,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_ancestor_limits_cap_effective_resources(self):
         probe = healthy()
+        probe.files[CGROUP + "/cgroup.subtree_control"] = "cpu memory\n"
         probe.files[CGROUP + "/user.slice/cpu.max"] = "200000 100000\n"
         probe.files[CGROUP + "/user.slice/memory.max"] = "17179869184\n"
         resources = build_report(probe)["checks"]["resources"]
@@ -124,6 +129,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_unreadable_ancestor_limit_makes_effective_unknown(self):
         probe = healthy()
+        probe.files[CGROUP + "/cgroup.subtree_control"] = "cpu\n"
         probe.files[CGROUP + "/user.slice/cpu.max"] = PermissionError("restricted")
         resources = build_report(probe)["checks"]["resources"]
         self.assertEqual(resources["state"], "unknown")
@@ -135,6 +141,50 @@ class PreflightTests(unittest.TestCase):
         resources = build_report(healthy(affinity_error=True))["checks"]["resources"]
         self.assertEqual(resources["state"], "unknown")
         self.assertIsNone(resources["affinity_cpu_millis"])
+
+    def test_missing_visible_cgroup_directory_is_not_success(self):
+        probe = healthy()
+        del probe.files[MEMBER + "/cgroup.controllers"]
+        resources = build_report(probe)["checks"]["resources"]
+        self.assertEqual(resources["state"], "unknown")
+        self.assertIsNone(resources["effective_cpu_millis"])
+        self.assertIsNone(resources["effective_memory_bytes"])
+
+    def test_missing_enabled_controller_limit_is_not_unlimited(self):
+        for controller in ("cpu", "memory"):
+            with self.subTest(controller=controller):
+                probe = healthy()
+                probe.files[CGROUP + "/cgroup.subtree_control"] = controller + "\n"
+                resources = build_report(probe)["checks"]["resources"]
+                self.assertEqual(resources["state"], "unknown")
+                self.assertIsNone(resources["effective_cpu_millis"])
+                self.assertIsNone(resources["effective_memory_bytes"])
+
+    def test_unreadable_parent_controller_state_is_not_unlimited(self):
+        probe = healthy()
+        probe.files[CGROUP + "/cgroup.subtree_control"] = PermissionError("restricted")
+        resources = build_report(probe)["checks"]["resources"]
+        self.assertEqual(resources["state"], "unknown")
+        self.assertIsNone(resources["effective_cpu_millis"])
+        self.assertIsNone(resources["effective_memory_bytes"])
+
+    def test_membership_change_during_scan_is_not_success(self):
+        probe = healthy()
+        original = probe.read
+        reads = []
+
+        def moving(path):
+            if str(path) == "/proc/self/cgroup":
+                reads.append(path)
+                return SELF_CGROUP if len(reads) == 1 else "0::/another-cgroup\n"
+            return original(path)
+
+        with mock.patch.object(probe, "read", side_effect=moving):
+            resources = build_report(probe)["checks"]["resources"]
+        self.assertEqual(resources["state"], "unknown")
+        self.assertIsNone(resources["effective_cpu_millis"])
+        self.assertIsNone(resources["effective_memory_bytes"])
+        self.assertEqual(len(reads), 2)
 
     def test_unavailable_cgroup_membership_never_claims_effective_totals(self):
         for value, expected in ((None, "unavailable"), (PermissionError("restricted"), "unknown"),

@@ -188,7 +188,12 @@ function closeWindow(win, persist = true) {
   win.element.remove();
   windows.delete(win.id);
   renderDock();
-  const next = [...windows.values()].filter(value => !value.minimized).at(-1);
+  const available = [...windows.values()].filter(value => !value.minimized);
+  // On narrow screens only the focused window is visible. Reveal the opener's
+  // still-open window before trying to focus the control it contains.
+  const openerWindow = restoreFocus && win.opener?.isConnected
+    ? available.find(value => value.element.contains(win.opener)) : null;
+  const next = openerWindow || available.find(value => value.element.dataset.focused === 'true') || available.at(-1);
   if (next) focus(next); else $('#active-app').textContent = '桌面';
   if (restoreFocus) {
     if (win.opener?.isConnected && win.opener !== document.body) win.opener.focus();

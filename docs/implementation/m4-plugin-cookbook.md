@@ -11,8 +11,9 @@
 
 - 提供者插件 `org.xelab.echo`（能力 `1.0.0`）已安装、签名并启用，其候选 Skill 已注册；
   消费者镜像已构建、签名并导入，发布者已受信。
-- 管理客户端持有效凭证，并被显式授予能力调用、Skill 读取/调用及精确主题的发布/订阅
-  权限。默认拒绝；主题无账户 owner，`owned_by` 不匹配主题。
+- 管理客户端持有效凭证，并被显式授予安装、部署、审批、启用、部署读取和 Operation 读取
+  等管理权限，以及能力调用、Skill 读取/调用及精确主题的发布/订阅权限。默认拒绝；
+  主题无账户 owner，`owned_by` 不匹配主题。
 - 插件实例由内核签发 mTLS 工作负载证书（`/run/xelab/identity`）。插件不持有用户令牌，
   不能自选 URL；Host 端点来自可信运行时环境 `XELAB_HOST_RPC_ENDPOINT`。
 
@@ -48,14 +49,21 @@
 
 | 步 | 操作 | 关键字段 |
 |---|---|---|
-| 1 | [installPlugin](../api/operations/plugins/installPlugin.md) `POST /api/platform/v1/installations` | 导入已签名 OCI 制品 |
-| 2 | [createDeployment](../api/operations/plugins/createDeployment.md) `POST /api/platform/v1/deployments` | `installation_id`、`limits`、`config={}`、`volume_ids=[]`；`enabled` 默认 false |
-| 3 | [approvePlugin](../api/operations/plugins/approvePlugin.md) `PUT /api/platform/v1/deployments/{deployment_id}/approval` | `rules` 覆盖上述六个代理动作，`egress=[]` |
-| 4 | [setDeploymentEnabled](../api/operations/plugins/setDeploymentEnabled.md) `PUT /api/platform/v1/deployments/{deployment_id}/enabled` | 启用事务重新解析并固定全部依赖绑定；缺强依赖、强环或超 16 层整份拒绝 |
+| 1 | [installPlugin](../api/operations/plugins/installPlugin.md) `POST /api/platform/v1/installations` | `image`、`publisher_id`、`signature`；等待安装 Operation 成功 |
+| 2 | [createDeployment](../api/operations/plugins/createDeployment.md) `POST /api/platform/v1/deployments` | `installation_id`、`display_name`、`limits`、`config={}`、`volume_ids=[]`；`enabled` 默认 false；等待创建 Operation 成功 |
+| 3 | [approvePlugin](../api/operations/plugins/approvePlugin.md) `PUT /api/platform/v1/deployments/{deployment_id}/approval` | `rules` 覆盖上述六个代理动作，`egress=[]`；`If-Match` 使用部署当前强 ETag |
+| 4 | [setDeploymentEnabled](../api/operations/plugins/setDeploymentEnabled.md) `PUT /api/platform/v1/deployments/{deployment_id}/enabled` | `{"enabled":true}`；重新读取部署的强 ETag 后设置 `If-Match`，等待启用 Operation 成功；依赖绑定失败则拒绝 |
 | 5 | [createSubscription](../api/operations/events/createSubscription.md) `POST /api/platform/v1/subscriptions` | `{"topic":"org.xelab.m4-consumer.completed","name":"run-results","start":"latest"}` |
-| 6 | [invokeCapability](../api/operations/capabilities/invokeCapability.md) `POST /api/platform/v1/calls` | `contract=org.xelab.m4-consumer.run@1.0.0`；`input={"message","skill_id","subscription_id"}` |
+| 6 | [invokeCapability](../api/operations/capabilities/invokeCapability.md) `POST /api/platform/v1/calls` | `contract` 为含 `name`、`version`、`schema_digest` 的对象；`input` 包含 `message`、`skill_id`、`subscription_id` |
 
-第 6 步的 `skill_id` 是已注册 echo 候选 Skill 的不可变 UUID（见
+步骤 1、2、4 的 `202` 返回的是 Operation，并非安装或部署对象本身。使用原 Operation
+UUID 调用 [getOperation](../api/operations/system/getOperation.md)，确认 `state=succeeded`
+后再使用 `result` 中的安装或部署 ID；失败或结果未知时先核实原操作，不换键盲目重试。
+步骤 3、4 均需从 [getDeployment](../api/operations/plugins/getDeployment.md) 取得最新
+部署 ETag，原样作为 `If-Match`；审批会更新部署 revision，因此启用前须重新读取。
+
+第 6 步的 `contract` 从已安装消费者清单中选取 `org.xelab.m4-consumer.run` 的完整
+`ContractRef`（包括 `schema_digest`），不是只发送名称和版本。`skill_id` 是已注册 echo 候选 Skill 的不可变 UUID（见
 [listSkills](../api/operations/skills/listSkills.md)），`subscription_id` 用第 5 步新建的
 订阅。[resolveDependencies](../api/operations/plugins/resolveDependencies.md) 的计划只是
 预览，不能作为后续执行的授权票据。

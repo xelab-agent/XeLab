@@ -26,6 +26,7 @@ let launcherCursor = null;
 let launcherLoading = false;
 let launcherError = null;
 let launcherEpoch = 0;
+let launcherPresentation = 0;
 let layer = 10;
 let accountId = null;
 let preferences = null;
@@ -373,22 +374,23 @@ async function resources(win) {
 async function clients(win) {
   await listSection(win,{title:'UI 客户端',operation:'listClients',actions:[button('注册公共客户端',()=>editor('注册 UI Client','createClient',{initial:{name:'',plugin_id:'',redirect_uris:[],allowed_origins:[],maximum_rules:[]}})),button('默认界面',async()=> { try { const result=await request('getDefaultUi',{signal:win.controller.signal});editor('设置默认界面','setDefaultUi',{initial:{deployment_id:result.data.deployment_id??null},etag:result.etag||revision(result.data),note:'设为 null 关闭根路径跳转。修改前请保留部署说明中的内核 CLI 恢复命令。'}); }catch(error){toast(error.message);} })],renderItem:item=>node('article',{class:'card'},node('h3',{},item.spec.name),node('p',{},item.status),node('p',{class:'code'},item.client_id),node('p',{},item.spec.allowed_origins.join(', ')),node('div',{class:'toolbar'},button('详情',()=>details('Client 信任范围',item)),button('修改',()=>editor('修改 Client','updateClient',{params:{client_id:item.id},initial:item.spec,etag:revision(item),note:'修改将作废旧授权请求与本Client现有凭证族。禁用Client不能通过修改复活。'})),button('禁用',()=>editor('禁用 Client','disableClient',{params:{client_id:item.id},body:false,etag:revision(item),note:'禁用会撤销本Client凭证族；保留核心 API/CLI 恢复路径。'}))))});
 }
-async function openContribution(value){
+async function openContribution(value,beforeOpen=()=>true){
   if(!accountId||!oauth.loggedIn){toast('打开页面需要当前账户的 session.read 权限以固定桥接主体。');return null;}
   const current=await request('getUiContribution',{params:{deployment_id:value.deployment_id,contribution_id:value.spec.id}});
   const fixed=validateContribution(current.data,{parentOrigin:location.origin,coreOrigin:runtimeConfig.core_origin});
   if(!sameContribution(value,fixed))throw new Error('贡献或权限已改变，请刷新后明确打开当前版本。');
-  return openCheckedContribution(fixed);
+  return openCheckedContribution(fixed,()=>true,beforeOpen);
 }
 // Internal bridge targets have already passed a fresh core read and all pinned
 // identity checks. Actual iframe mounting still revalidates the target below.
-async function openCheckedContribution(fixed,sourceCurrent=()=>true){
+async function openCheckedContribution(fixed,sourceCurrent=()=>true,beforeOpen=()=>true){
   const epoch=sessionEpoch,subject=accountId;
   const current=()=>epoch===sessionEpoch&&oauth.loggedIn&&accountId===subject&&Boolean(subject)&&sourceCurrent();
   if(!current())throw new Error('登录来源或页面通道已改变，请重新打开页面。');
   if(fixed.spec.kind!=='window')throw new Error('该贡献不是窗口。');
   const reference=await contributionReference(fixed);
   if(!current())throw new Error('登录来源或页面通道已改变，请重新打开页面。');
+  if(!beforeOpen())return null;
   return openWindow({id:`plugin:${fixed.deployment_id}:${fixed.spec.id}`,title:`${fixed.spec.title} · ${fixed.plugin_id}`,render:win=>displayContribution(win,fixed,reference,false)},{ephemeral:true,restoreRef:reference});
 }
 async function contributionReference(fixed) {
@@ -704,7 +706,12 @@ function renderLauncher() {
   for(const item of found){
     const launch=button(item.spec.kind==='widget'?'添加桌面组件':'打开隔离窗口',async()=>{
       launch.disabled=true;
-      try{if(item.spec.kind==='widget')await addWidget(item);else await openContribution(item);$('#launcher').close();}
+      const presentation=launcherPresentation;
+      const currentLauncher=()=>$('#launcher').open&&presentation===launcherPresentation;
+      // The modal blocks focus outside itself. Close only this presentation,
+      // after the contribution checks succeed and before creating the window.
+      const closeLauncher=()=>{if(!currentLauncher())return false;$('#launcher').close();return true;};
+      try{if(item.spec.kind==='widget'){await addWidget(item);closeLauncher();}else await openContribution(item,closeLauncher);}
       catch(error){toast(error.message);}finally{launch.disabled=item.availability!=='ready';}
     },{disabled:item.availability!=='ready','aria-label':`启动贡献 ${item.spec.title}`});
     $('#app-grid').append(node('article',{class:'launcher-contribution card'},node('h3',{},item.spec.title),node('p',{},`${item.spec.kind} · ${item.availability}`),node('p',{class:'code'},`${item.plugin_id} · ${item.deployment_id}`),node('p',{},item.reason_codes.join(' · ')),launch,item.spec.kind==='window'?pinControl(item):null));
@@ -730,7 +737,7 @@ async function loadLauncher(reset) {
   }catch(error){if(epoch===launcherEpoch)launcherError=error;}
   finally{if(epoch===launcherEpoch){launcherLoading=false;renderLauncher();}}
 }
-function openLauncher(){renderLauncher();$('#launcher').showModal();loadLauncher(true);}
+function openLauncher(){launcherPresentation++;renderLauncher();$('#launcher').showModal();loadLauncher(true);}
 $('#launcher-toggle').addEventListener('click',openLauncher);
 $('#launcher-close').addEventListener('click',()=>$('#launcher').close());
 $('#app-search').addEventListener('input',renderLauncher);

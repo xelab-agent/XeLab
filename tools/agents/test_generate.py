@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import generate
 
@@ -144,6 +145,28 @@ class GenerateTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(generate.main(["--config", str(path)]), 1)
         self.assertEqual({target: (ROOT / target).read_bytes() for target in generate.OUTPUTS}, before)
+
+    def test_missing_configured_document_rejects_without_writing(self):
+        for missing_key in generate.DOC_KEYS:
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = load_config()
+                for key in generate.DOC_KEYS:
+                    if key != missing_key:
+                        document = root / config[key]
+                        document.parent.mkdir(parents=True, exist_ok=True)
+                        document.write_text('fixture', encoding='utf-8')
+                outputs = {}
+                for target in generate.OUTPUTS:
+                    output = root / target
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text('unchanged', encoding='utf-8')
+                    outputs[target] = output
+                config_path = write_config(root, config)
+                with patch.object(generate, 'ROOT', root), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(generate.main(['--config', str(config_path)]), 1)
+                self.assertEqual({target: output.read_text(encoding='utf-8') for target, output in outputs.items()},
+                                 {target: 'unchanged' for target in generate.OUTPUTS})
 
 
 if __name__ == "__main__":

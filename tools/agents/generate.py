@@ -39,6 +39,8 @@ def load_config(path):
         value = config[key]
         if not isinstance(value, str) or not value.endswith(".md") or any(part in {"", ".", ".."} for part in value.split("/")):
             raise ValueError(key + " must be a repo-relative Markdown path without traversal")
+        if not (ROOT / value).is_file():
+            raise ValueError(key + " must refer to an existing Markdown file")
     interval = config["maintenance_interval_minutes"]
     if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 1440:
         raise ValueError("maintenance_interval_minutes must be an integer between 1 and 1440")

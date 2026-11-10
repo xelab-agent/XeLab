@@ -86,6 +86,7 @@
   "open_issues": 4,
   "repository": "example/project",
   "schema": 1,
+  "status_conflicts": [],
   "unassigned": [
     3,
     7,

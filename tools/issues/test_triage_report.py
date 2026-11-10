@@ -79,6 +79,19 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(report["issues"][0]["labels"], [])
         self.assertEqual(report["issues"][1]["labels"], ["area:docs", "status:needs-triage"])
 
+    def test_conflicting_status_labels_are_visible_and_do_not_hide_triage(self):
+        api = FakeAPI(issues=[
+            issue(1, "blocked but needs triage", labels=["status:blocked", "status:needs-triage"]),
+            issue(2, "ready and in progress", labels=["status:ready", "status:in-progress"]),
+            issue(3, "ready", labels=["status:ready"]),
+            issue(4, "unlabeled"),
+        ])
+        report = build_report(api)
+        self.assertEqual(report["status_conflicts"], [1, 2])
+        self.assertEqual(report["needs_triage"], [1, 4])
+        self.assertIn("conflicting status labels (manual review): [1, 2]", render_text(report))
+        self.assertTrue(all(method == "GET" for method, _ in api.calls))
+
     def test_assignees_and_unassigned(self):
         api = FakeAPI(issues=[issue(1, "owned", assignees=["b", "a"]), issue(2, "free")])
         report = build_report(api)

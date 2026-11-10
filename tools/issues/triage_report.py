@@ -124,7 +124,8 @@ def build_report(api):
         "open_issues": len(issues),
         "excluded_prs": len(prs),
         "issues": issues,
-        "needs_triage": [i["number"] for i in issues if i["status"] in {"no-status", "status:needs-triage"}],
+        "needs_triage": [i["number"] for i in issues if i["status"] == "no-status" or "status:needs-triage" in i["labels"]],
+        "status_conflicts": [i["number"] for i in issues if sum(label.startswith("status:") for label in i["labels"]) > 1],
         "unassigned": [i["number"] for i in issues if not i["assignees"]],
         "multiple_claimants": [i["number"] for i in issues if i["multiple_claimants"]],
         "duplicate_candidates": duplicate_candidates(issues),
@@ -137,6 +138,7 @@ def render_text(report):
     lines = [
         f"{report['repository']}: {report['open_issues']} open issues ({report['excluded_prs']} PRs excluded)",
         f"needs triage (no-status or needs-triage): {report['needs_triage'] or 'none'}",
+        f"conflicting status labels (manual review): {report['status_conflicts'] or 'none'}",
         f"unassigned: {report['unassigned'] or 'none'}",
         f"multiple claim candidates (manual review): {report['multiple_claimants'] or 'none'}",
     ]

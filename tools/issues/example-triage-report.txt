@@ -1,5 +1,6 @@
 example/project: 4 open issues (1 PRs excluded)
 needs triage (no-status or needs-triage): [3, 7]
+conflicting status labels (manual review): none
 unassigned: [3, 7, 9]
 multiple claim candidates (manual review): [5]
   #3 status:needs-triage assignees=none claims=0 [bug] add   offline ARTIFACT checker!

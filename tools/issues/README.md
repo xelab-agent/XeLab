@@ -23,7 +23,10 @@ python3 tools/issues/triage_report.py --repo OWNER/NAME --json
 
 - 自动分页读取 Open Issue 与每个 Issue 的评论；排除 PR；只发 GET，拒绝重定向，
   任何 API 失败即整体停止（退出码 1），不输出部分结果。
-- `status` 取首个 `status:*` 标签，无则 `no-status`；两者都列入 `needs_triage` 待核对。
+- `status` 为兼容既有报告取排序后的首个 `status:*` 标签，无则 `no-status`。
+  `needs_triage` 包含无状态或带 `status:needs-triage` 标签的 Issue，
+  即使后者同时带有其他状态标签也不会漏掉；多个状态标签列入 `status_conflicts`，
+  须人工核对，不能将首个状态当成最终裁定。
 - 认领候选只匹配评论中的 `认领申请` / `/claim` 标记，仅输出账号、时间、评论 URL，
   不输出评论正文；多人候选标记 `multiple_claimants`，不是裁定。
 - 重复候选来自相同规范化标题或高重合关键词（`duplicates_are_definitive=false`）。
@@ -36,7 +39,7 @@ python3 tools/issues/triage_report.py --repo OWNER/NAME --json
 
 报告只提示待核对项，所有结论必须由人按流程确认：
 
-1. `needs_triage` / `unassigned`：打开 Issue URL，按 issue-workflow.md 核对证据、
+1. `needs_triage` / `status_conflicts` / `unassigned`：打开 Issue URL，按 issue-workflow.md 核对状态、证据、
    重复与依赖；标签与指派只能由维护者或经明确授权的分流 Agent 设置。
 2. `multiple_claimants`：逐条打开 `claim_candidates` 中的评论 URL，核对完整正文、
    时间线与后续维护者确认评论；出现双重确认时按流程暂停实现，等待新的唯一确认。

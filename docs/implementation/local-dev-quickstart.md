@@ -54,8 +54,8 @@ python3 examples/echo/build_artifact.py \
 
 | 现象 | 含义 |
 |---|---|
-| 命令退出码 0 且输出 PASS/OK | 该组检查通过（仅限其声明范围） |
-| 输出提示跳过（如未设置数据库 DSN） | 未验证；不能宣称对应能力完成 |
+| 命令退出码 0 且输出 PASS/OK | 命令未报告失败；仍须检查依赖与提前返回，确认实际验证范围 |
+| 存在忽略、跳过或提前返回的用例 | 对应能力未验证；不能宣称完成 |
 | 缺 binary/依赖报错 | 环境不支持；补齐后重跑，或如实记录未执行 |
 
 第 4 步只写出 `/tmp/xelab-quickstart/xelab/plugin.json` 与契约文件；
@@ -81,7 +81,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 ```
 
-- 未设置 `XELAB_TEST_DATABASE_URL` 时数据库测试**提示跳过**；这不等于数据库验证完成。
+- 未设置 `XELAB_TEST_DATABASE_URL` 时，部分数据库用例会提前返回，Cargo 仍将它们
+  计为 `ok`，而非 `ignored`。默认输出会捕获部分用例打印的跳过提示，另有用例
+  没有提示。`cargo test ... -- --nocapture` 可显示已有提示，但不能证明所有用例都
+  执行了；须记录 DSN 是否设置和实际测试范围，不能据此宣称数据库验证完成。
 - 真实 OCI、XFS、浏览器等测试默认 `ignored`，需要显式环境变量与一次性主机（第 6 节），
   本地 `cargo test` 不会执行它们。
 - 本机没有 cargo/rustc 时，以上全部记为未执行；不要用文档检查冒充编译证据。
@@ -116,7 +119,7 @@ cargo fmt --all -- --check
 |---|---|
 | strict 报缺 jsonschema/openapi_spec_validator 等 | 用第 3 节 venv 安装 requirements；否则记录未执行 |
 | `tools/issues` 报缺 yaml | 安装 `tools/issues/requirements.txt` 的 PyYAML |
-| 数据库测试提示跳过 | 第 5 节设置 DSN；跳过不是失败也不是通过 |
+| 未设置 DSN 或不确定数据库测试是否实际执行 | 第 5 节设置 DSN 并重跑；`ok` 和 `--nocapture` 都不能单独证明数据库路径已执行 |
 | OCI/XFS 测试被 ignored | 需要一次性特权主机与显式开关；不要在共享宿主尝试 |
 | `--locked` 报锁文件漂移 | 不要手改 Cargo.lock；核对基线 commit 与工具链 |
 | Fork PR 的 CI 显示 `action_required` | 首次外部贡献需维护者批准工作流运行；批准前按第 2–4 节本地执行并在 PR 记录实际输出，未运行的 CI 不得写成通过 |

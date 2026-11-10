@@ -52,7 +52,7 @@ python3 examples/event-consumer/drive.py
 | 相同 event_id 重投 | 不重复副作用，直接对新 delivery 确认 |
 | ACK 204 | 日志记 confirmed |
 | ACK 超时（结果未知） | 仅以原键重试一次；仍未知则保留 prepared，等重投去重收敛 |
-| 409 LEASE_CONFLICT | 记 superseded；**绝不**用旧令牌重试，等待重投 |
+| 409 STATE_CONFLICT | 记 state_conflict；**绝不**用旧令牌重试，先核对订阅与投递状态；订阅仍活动时才等待重投 |
 | 409 IDEMPOTENCY_CONFLICT | 记 conflict 并抛出，交人工核查，不自动重放 |
 | 401/403（失权） | 记 rejected 并抛出 NotAuthorized，停止消费 |
 | 主题不在允许列表 | dead_letter，不产生副作用 |
@@ -66,6 +66,8 @@ python3 examples/event-consumer/drive.py
   后令牌丢失没有关系——租约到期后平台重投，消费者用 event_id 去重。
 - prepared 确认意图**不会**在重启后自动重放：重启只恢复去重状态，未确认
   的消息由平台重投驱动收敛，避免旧 delivery/旧键推进新游标。
+- `STATE_CONFLICT` 既可能是旧租约，也可能是订阅已停用；仅凭错误码无法区分。
+  消费循环应暂停并核对订阅，不能直接假定一定会重投。
 - 业务副作用在本示例中是本地 ledger 行（side_effects 表，event_id 唯一）。
   真实消费者应把此处替换为自己的业务事务，并保持「先提交、后 ACK」顺序。
 

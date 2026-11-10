@@ -91,13 +91,13 @@ def scenario_stale_lease(directory):
     fresh = service.deliver(sub)
     assert fresh["delivery_id"] != old["delivery_id"]
     stale_report = consumer.handle(old)
-    assert stale_report["state"] == "superseded"
+    assert stale_report["state"] == "state_conflict"
     assert store.report()["side_effects"] == 1  # old handle committed before ack
     fresh_report = consumer.handle(fresh)
     assert fresh_report["state"] == "confirmed" and fresh_report["deduplicated"]
     assert store.report()["side_effects"] == 1
     store.close()
-    return "stale lease ack: 409 superseded, redelivery deduplicated"
+    return "stale lease ack: 409 state conflict, simulated redelivery deduplicated"
 
 
 def scenario_revoked(directory):

@@ -139,9 +139,9 @@ class FakeEventService:
             return AckResult(204)
         if delivery is None or delivery["delivery_id"] != delivery_id \
                 or delivery["lease_token"] != lease_token:
-            return AckResult(409, "LEASE_CONFLICT")
+            return AckResult(409, "STATE_CONFLICT")
         if self.now >= delivery["expires"]:
-            return AckResult(409, "LEASE_CONFLICT")
+            return AckResult(409, "STATE_CONFLICT")
         if outcome == "ack":
             sub["last_acked"] = (delivery_id, lease_token)
             self._terminate(sub)

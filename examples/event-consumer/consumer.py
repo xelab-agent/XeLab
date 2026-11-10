@@ -195,11 +195,12 @@ class Consumer:
             self.store.record_ack(key, "confirmed")
             report["state"] = "confirmed"
             return report
-        if result.status == 409 and result.code == "LEASE_CONFLICT":
-            # The lease expired or was taken over. Never retry the old token;
-            # wait for redelivery, which dedupe handles.
-            self.store.record_ack(key, "superseded")
-            report["state"] = "superseded"
+        if result.status == 409 and result.code == "STATE_CONFLICT":
+            # This can mean a stale lease, but also a disabled subscription.
+            # Never retry the old token; the caller must recheck state before
+            # waiting for an active subscription's redelivery.
+            self.store.record_ack(key, "state_conflict")
+            report["state"] = "state_conflict"
             return report
         if result.status == 409 and result.code == "IDEMPOTENCY_CONFLICT":
             self.store.record_ack(key, "conflict", detail=result.code)

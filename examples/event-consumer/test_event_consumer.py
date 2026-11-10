@@ -79,6 +79,16 @@ class HappyPathTests(ConsumerTestCase):
 
 
 class RedeliveryTests(ConsumerTestCase):
+    def test_kernel_state_conflict_requires_subscription_recheck(self):
+        delivery = self.deliver()
+        # The kernel uses STATE_CONFLICT both for a stale lease and a disabled
+        # subscription; the response alone does not distinguish them.
+        with mock.patch.object(self.service, "ack", return_value=AckResult(409, "STATE_CONFLICT")) as ack:
+            report = self.consumer.handle(delivery)
+        self.assertEqual(report["state"], "state_conflict")
+        self.assertEqual(ack.call_count, 1)
+        self.assertEqual(self.store.report()["ack_states"], {"state_conflict": 1})
+
     def test_duplicate_event_redelivery_has_no_second_side_effect(self):
         with mock.patch.object(self.service, "ack",
                                side_effect=TransportTimeout("lost")):
@@ -110,14 +120,14 @@ class RedeliveryTests(ConsumerTestCase):
         self.assertEqual(summary["side_effects"], 1)
         self.assertEqual(summary["ack_states"], {"prepared": 1, "confirmed": 1})
 
-    def test_stale_lease_ack_is_superseded(self):
+    def test_stale_lease_ack_requires_recheck_before_redelivery(self):
         old = self.deliver()
         self.service.advance(LEASE_SECONDS + 1)
         fresh = self.deliver()
         self.assertNotEqual(fresh["delivery_id"], old["delivery_id"])
         self.assertNotEqual(fresh["lease_token"], old["lease_token"])
         stale_report = self.consumer.handle(old)
-        self.assertEqual(stale_report["state"], "superseded")
+        self.assertEqual(stale_report["state"], "state_conflict")
         fresh_report = self.consumer.handle(fresh)
         self.assertEqual(fresh_report["state"], "confirmed")
         self.assertTrue(fresh_report["deduplicated"])
@@ -131,7 +141,7 @@ class RedeliveryTests(ConsumerTestCase):
             delivery_id=delivery["delivery_id"],
             lease_token=delivery["lease_token"],
             outcome="ack", idempotency_key="key-expired")
-        self.assertEqual((result.status, result.code), (409, "LEASE_CONFLICT"))
+        self.assertEqual((result.status, result.code), (409, "STATE_CONFLICT"))
 
 
 class AuthorizationTests(ConsumerTestCase):

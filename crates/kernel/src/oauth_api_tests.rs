@@ -376,3 +376,56 @@ async fn main_router_client_cookie_csrf_and_registered_foreign_origin_credential
         before + 1
     );
 }
+
+#[tokio::test]
+async fn session_list_can_return_empty_page_with_a_later_active_session() {
+    let Some(f) = Fixture::new("https://kernel.example.org:8443", "https://ui.example.org").await
+    else {
+        return;
+    };
+    let c = f.app.db.connect().await.unwrap();
+    // Insert only disposable, non-session metadata into this isolated test DB.
+    // Their earlier timestamps force the public endpoint to scan an empty page.
+    c.execute(
+        "INSERT INTO credentials(id,owner_id,kind,hmac_key_id,verification_digest,status,conditions,expires_at,created_at,updated_at) \
+         SELECT gen_random_uuid(),$1,'api_key','page-fixture',decode(md5(n::text),'hex'),'expired','{}'::jsonb, \
+                now()+interval '1 hour',now()-interval '2 days',now() \
+         FROM generate_series(1,201) AS n",
+        &[&f.owner],
+    ).await.unwrap();
+    let first = f
+        .call(bearer(
+            f.request("GET", "/api/platform/v1/sessions?limit=200")
+                .body(Body::empty())
+                .unwrap(),
+            &f.session,
+        ))
+        .await;
+    assert_eq!(first.status(), 200);
+    let first = value(first).await;
+    validate("SessionPage", &first).unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 0);
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("filtered page must retain a cursor");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("limit", "200")
+        .append_pair("cursor", cursor)
+        .finish();
+    let next = f
+        .call(bearer(
+            f.request("GET", &format!("/api/platform/v1/sessions?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+            &f.session,
+        ))
+        .await;
+    assert_eq!(next.status(), 200);
+    let next = value(next).await;
+    validate("SessionPage", &next).unwrap();
+    assert!(next["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["account_id"] == f.owner.to_string() && item["status"] == "active"));
+}

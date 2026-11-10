@@ -199,6 +199,10 @@ fn fixture_fields_and_operations_match_the_checked_in_openapi() {
     assert_eq!(limit["schema"]["maximum"], 200);
     assert_eq!(cursor["schema"]["maxLength"], 2048);
     let schemas = &contract["components"]["schemas"];
+    assert!(schemas["DeploymentPage"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("next_cursor")));
     let valid_node = node();
     let valid_error = error("PERMISSION_DENIED");
     for (schema_name, fixture) in [
@@ -272,6 +276,38 @@ async fn node_and_deployment_pages_use_fixed_paths_and_encoded_cursor() {
         .collect();
     assert!(query.contains(&("limit".into(), "2".into())));
     assert!(query.contains(&("cursor".into(), "next+/= cursor".into())));
+}
+
+#[tokio::test]
+async fn deployment_page_requires_cursor_field_but_accepts_explicit_null() {
+    let fixture = TlsFixture::start(vec![
+        Reply::json(200, json!({"items": []})),
+        Reply::json(200, json!({"items": [], "next_cursor": null})),
+        Reply::json(200, json!({"items": [], "next_cursor": "next"})),
+    ])
+    .await;
+    let client = fixture.client();
+    let missing = client.list_deployments(None, None).await;
+    assert!(
+        matches!(&missing, Err(ClientError::InvalidResponse)),
+        "a missing cursor must not mean pagination is complete: {missing:?}"
+    );
+    assert!(client
+        .list_deployments(None, None)
+        .await
+        .unwrap()
+        .next_cursor
+        .is_none());
+    assert_eq!(
+        client
+            .list_deployments(None, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .as_deref(),
+        Some("next")
+    );
+    assert_eq!(fixture.requests().len(), 3);
 }
 
 #[tokio::test]

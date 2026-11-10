@@ -13,7 +13,8 @@ supplied CA is trusted; certificate and hostname checks remain enabled. The
 client refuses redirects, limits response bodies to 4 MiB, and never retries.
 `list_deployments` returns one page; pass `next_cursor` back with the same
 account and query scope, before it expires. Limits are 1–200 and cursors are
-1–2048 characters, as in OpenAPI.
+1–2048 characters, as in OpenAPI. An explicit null cursor ends pagination; a
+missing `next_cursor` is an invalid response rather than an end-of-list marker.
 
 HTTP errors retain the status and, when valid JSON is returned, the standard
 `ErrorEnvelope`. Non-JSON or malformed error bodies are not exposed. Transport,

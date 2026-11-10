@@ -126,7 +126,16 @@ pub struct NodeConfig {
 #[derive(Debug, Deserialize)]
 pub struct DeploymentPage {
     pub items: Vec<Value>,
+    // Explicit null means the final page; a missing field is not the same.
+    #[serde(deserialize_with = "required_nullable_cursor")]
     pub next_cursor: Option<String>,
+}
+
+fn required_nullable_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 /// A client bound to one exact HTTPS origin and one explicit CA.

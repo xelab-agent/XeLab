@@ -756,6 +756,105 @@ class DesktopBrowser(unittest.TestCase):
         self.assertEqual(editor.locator('.code').text_content(), original_key)
         self.assertTrue(self.page.get_by_role("button", name="退出", exact=True).is_visible())
 
+    def session_page_routes(self, pages, hold_cursor=None, expose_account=False):
+        cursors, held = [], []
+        self.page.unroute("**/*")
+        def complete(route, data):
+            route.fulfill(status=200, headers={"access-control-allow-origin": SHELL},
+                          content_type="application/json", body=json.dumps(data))
+        def route(route):
+            request = route.request
+            url = urlparse(request.url)
+            if expose_account and f"{url.scheme}://{url.netloc}" == SHELL and url.path == BASE + "app.js":
+                source = (PUBLIC / "app.js").read_text() + "\nglobalThis.__fixtureAccountId=()=>accountId;\n"
+                route.fulfill(status=200, content_type="text/javascript", body=source)
+            elif (f"{url.scheme}://{url.netloc}" == CORE and request.method == "GET"
+                    and url.path == "/api/platform/v1/sessions"):
+                cursor = parse_qs(url.query).get("cursor", [None])[0]
+                cursors.append(cursor)
+                data = pages(cursor) if callable(pages) else pages[cursor]
+                if cursor == hold_cursor and hold_cursor is not None:
+                    held.append((route, data))
+                else:
+                    complete(route, data)
+            else:
+                self.route(route)
+        self.page.route("**/*", route)
+        return cursors, held, complete
+
+    def open_after_identity_scan(self):
+        with self.page.expect_request(lambda request: request.url.endswith("/me/ui-preferences")):
+            self.open()
+
+    def test_overview_finds_identity_after_an_empty_session_page(self):
+        cursors, _, _ = self.session_page_routes({None: {"items": [], "next_cursor": "next"},
+            "next": {"items": [{"account_id": ACCOUNT, "status": "active"}], "next_cursor": None}})
+        self.open_after_identity_scan()
+        window = self.app("总览")
+        expect(window).to_contain_text(f"当前账户：{ACCOUNT}")
+        self.assertEqual(cursors, [None, "next"])
+
+    def test_identity_scan_stops_on_repeated_cursor(self):
+        cursors, _, _ = self.session_page_routes({None: {"items": [], "next_cursor": "next"},
+                                                  "next": {"items": [], "next_cursor": "next"}})
+        self.open_after_identity_scan()
+        expect(self.app("总览")).to_contain_text("当前账户未确认")
+        self.assertEqual(cursors, [None, "next"])
+
+    def test_identity_scan_fails_closed_for_ambiguous_subjects(self):
+        cursors, _, _ = self.session_page_routes({None: {"items": [
+            {"account_id": ACCOUNT, "status": "active"}, {"account_id": SKILL, "status": "active"}],
+            "next_cursor": None}})
+        self.open_after_identity_scan()
+        expect(self.app("总览")).to_contain_text("当前账户未确认")
+        self.assertEqual(cursors, [None])
+
+    def test_identity_scan_fails_closed_for_malformed_cursor(self):
+        cursors, _, _ = self.session_page_routes({None: {"items": [], "next_cursor": {"bad": True}}})
+        self.open_after_identity_scan()
+        expect(self.app("总览")).to_contain_text("当前账户未确认")
+        self.assertEqual(cursors, [None])
+
+    def test_identity_scan_fails_closed_for_invalid_active_subject(self):
+        cursors, _, _ = self.session_page_routes({None: {"items": [{"account_id": "not-a-uuid", "status": "active"}],
+                                                         "next_cursor": None}})
+        self.open_after_identity_scan()
+        expect(self.app("总览")).to_contain_text("当前账户未确认")
+        self.assertEqual(cursors, [None])
+
+    def test_identity_scan_is_bounded_when_every_page_is_empty(self):
+        def page(cursor):
+            number = 0 if cursor is None else int(cursor[1:])
+            return {"items": [], "next_cursor": f"p{number + 1}"}
+        cursors, _, _ = self.session_page_routes(page)
+        self.open_after_identity_scan()
+        expect(self.app("总览")).to_contain_text("当前账户未确认")
+        self.assertEqual(len(cursors), 10)
+
+    def test_logout_during_identity_scan_cannot_restore_the_old_subject(self):
+        self.context.add_init_script(f'''(() => {{
+          const original=Response.prototype.arrayBuffer, target={json.dumps(ACCOUNT)};
+          globalThis.__oldSessionDecoded=false;
+          Response.prototype.arrayBuffer=async function(...args) {{
+            const bytes=await original.apply(this,args);
+            if(new TextDecoder().decode(bytes).includes(target)) globalThis.__oldSessionDecoded=true;
+            return bytes;
+          }};
+        }})()''')
+        cursors, held, complete = self.session_page_routes({None: {"items": [], "next_cursor": "next"},
+            "next": {"items": [{"account_id": ACCOUNT, "status": "active"}], "next_cursor": None}}, hold_cursor="next", expose_account=True)
+        with self.page.expect_request(lambda request: "cursor=next" in request.url):
+            self.open()
+        self.assertEqual(len(held), 1)
+        self.page.get_by_role("button", name="退出", exact=True).click()
+        self.page.get_by_role("button", name="登录", exact=True).wait_for()
+        complete(*held[0])
+        self.page.wait_for_function("globalThis.__oldSessionDecoded === true")
+        self.page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+        self.assertEqual(self.page.get_by_role("button", name="退出", exact=True).count(), 0)
+        self.assertIsNone(self.page.evaluate("globalThis.__fixtureAccountId()"))
+        self.assertEqual(cursors, [None, "next"])
+
     def test_overview_reads_authorized_data_refreshes_and_hides_config(self):
         responses, observed = overview_fixtures(), []
         self.route_overview(responses, observed)

@@ -799,6 +799,27 @@ document.addEventListener('keydown',event=> {if(event.key==='Escape'&&$('#launch
 function tick() {$('#clock').textContent=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit'}).format(new Date());}
 tick();setInterval(tick,30000);
 renderDock();renderLauncher();applyTheme();
+async function readActiveAccount() {
+  // The self-session endpoint can return an empty filtered page with a cursor.
+  // Limit the scan and use one shared request deadline; ambiguous results stay unknown.
+  const seen=new Set(), signal=AbortSignal.timeout(10000);
+  let cursor=null;
+  for(let page=0;page<10;page++) {
+    const response=await request('listSessions',{query:{limit:200,...(cursor?{cursor}:{})},signal});
+    accountIdentityReadAt=new Date().toISOString();
+    const data=response.data, next=data?.next_cursor;
+    if(!Array.isArray(data?.items)||data.items.length>200
+        ||!(next===null||(typeof next==='string'&&next.length>0&&next.length<=2048)))return null;
+    const subjects=[...new Set(data.items.filter(item=>item?.status==='active').map(item=>item.account_id))];
+    if(subjects.length>1)return null;
+    if(subjects.length===1) {
+      return typeof subjects[0]==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(subjects[0])?subjects[0]:null;
+    }
+    if(next===null||seen.has(next))return null;
+    seen.add(next);cursor=next;
+  }
+  return null;
+}
 async function boot() {
   try {
     if (location.pathname === '/ui/org.xelab.webui/callback') {
@@ -808,10 +829,7 @@ async function boot() {
     if (!oauth.loggedIn) return;
     $('#login').textContent='退出';$('#welcome').hidden=true;$('#connection').textContent='正在验证连接…';
     try {
-      const sessions=await request('listSessions',{query:{limit:200}});
-      accountIdentityReadAt=new Date().toISOString();
-      const subjects=[...new Set(rows(sessions.data).filter(item=>item.status==='active').map(item=>item.account_id))];
-      if(subjects.length===1) accountId=subjects[0];
+      accountId=await readActiveAccount();
     } catch { /* Authorization may intentionally exclude session metadata. */ }
     const key=layoutKey();
     // Read the previous session's layout before any further await. Interactive

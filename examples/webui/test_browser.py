@@ -9,6 +9,7 @@ import pathlib
 import unittest
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import jsonschema
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeoutError
 from test_bridge import contribution, FRAME, PLUGIN
 
@@ -712,6 +713,95 @@ class DesktopBrowser(unittest.TestCase):
         self.assertEqual(editor.locator('.code').text_content(), original_key)
         self.assertTrue(self.page.get_by_role("button", name="退出", exact=True).is_visible())
 
+
+class OperationBrowser(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        contract = json.loads((PUBLIC.parents[2] / 'docs/contracts/openapi.json').read_text())
+        cls.operation_states = contract['components']['schemas']['Operation']['properties']['state']['enum']
+        cls.operation_validator = jsonschema.Draft202012Validator({
+            '$ref': '#/components/schemas/Operation', 'components': contract['components'],
+        }, format_checker=jsonschema.FormatChecker())
+        DesktopBrowser.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        DesktopBrowser.tearDownClass.__func__(cls)
+
+    def tearDown(self):
+        DesktopBrowser.tearDown(self)
+
+    def setUp(self):
+        DesktopBrowser.setUp(self)
+        self.operation_state = 'succeeded'
+        self.operation_result = {'message': 'actual result'}
+        self.operation_reads = []
+
+    def route(self, route):
+        request = route.request
+        url = urlparse(request.url)
+        if (f'{url.scheme}://{url.netloc}' == CORE and request.method == 'GET'
+                and url.path.startswith('/api/platform/v1/operations/')):
+            identifier = url.path.rsplit('/', 1)[1]
+            value = {
+                'id': identifier, 'revision': 1, 'kind': 'installPlugin',
+                'created_at': NOW, 'updated_at': NOW,
+                'state': self.operation_state, 'progress_percent': 100 if self.operation_state == 'succeeded' else 0,
+                'resource_id': None,
+                'result': self.operation_result if self.operation_state == 'succeeded' else None,
+                'error': {'code': 'STATE_CONFLICT', 'message': 'fixture failure',
+                          'retryable': False, 'violations': [], 'retry_after_ms': None}
+                         if self.operation_state == 'failed' else None,
+            }
+            self.operation_validator.validate(value)
+            self.operation_reads.append(identifier)
+            route.fulfill(status=200, content_type='application/json',
+                          headers={'access-control-allow-origin': SHELL}, body=json.dumps(value))
+            return
+        DesktopBrowser.route(self, route)
+
+    def query_window(self):
+        DesktopBrowser.open(self)
+        self.page.get_by_role('button', name='打开应用启动器', exact=True).click()
+        self.page.get_by_role('button', name='启动任务与知识库', exact=True).click()
+        win = self.page.locator('.window').last
+        win.get_by_role('textbox', name='Operation UUID').fill(ACCOUNT)
+        win.get_by_role('button', name='查询', exact=True).click()
+        win.locator('.operation-card').wait_for()
+        return win
+
+    def test_contract_states_are_shown(self):
+        win = self.query_window()
+        for state in self.operation_states:
+            with self.subTest(state=state):
+                self.operation_state = state
+                win.get_by_role('button', name='查询', exact=True).click()
+                card = win.locator('.operation-card')
+                card.wait_for()
+                observed = card.locator('.badge').inner_text()
+                self.assertEqual(observed, state)
+                self.assertNotIn('状态未知', card.locator('.operation-body').inner_text())
+
+    def test_refresh_queries_the_displayed_operation(self):
+        win = self.query_window()
+        win.get_by_role('textbox', name='Operation UUID').fill(SKILL)
+        win.locator('.operation-card').get_by_role('button', name='刷新', exact=True).click()
+        win.locator('.operation-card').wait_for()
+        self.assertEqual(self.operation_reads, [ACCOUNT, ACCOUNT])
+
+    def test_falsey_json_results_are_shown(self):
+        win = self.query_window()
+        for value in [False, 0, '', None]:
+            with self.subTest(value=value):
+                self.operation_result = value
+                win.get_by_role('button', name='查询', exact=True).click()
+                card = win.locator('.operation-card')
+                card.wait_for()
+                body = card.locator('.operation-body')
+                self.assertEqual(body.locator('pre.result').count(), 1)
+                actual = json.loads(body.locator('pre.result').inner_text())
+                self.assertIs(type(actual), type(value))
+                self.assertEqual(actual, value)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

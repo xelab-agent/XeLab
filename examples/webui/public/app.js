@@ -645,15 +645,16 @@ async function settings(win) {
 }
 async function unavailable(win) {win.content.replaceChildren(toolbar(win,win.app.title),state('unavailable','当前版本尚不可用','Batch、Workflow、微插件与知识库属于后续执行系统。此桌面未伪造任务、数据或成功响应。'));}
 function operationCard(op,onRefresh) {
-  const status=op.status||'unknown';const succeeded=status==='succeeded',failed=status==='failed',pending=status==='pending';
+  const status=op.state||'unknown';const succeeded=status==='succeeded',failed=status==='failed',active=['pending','running','cancel_requested'].includes(status);
   const badge=node('span',{class:'badge','data-status':status},status);
   const card=node('article',{class:'card operation-card','data-status':status});
   const header=node('div',{class:'operation-header'},node('h3',{},'Operation ',badge),node('div',{class:'operation-actions'},button('复制 ID',()=>{navigator.clipboard?.writeText(op.id).then(()=>toast('Operation ID 已复制')).catch(()=>toast('复制失败'))},{'aria-label':'复制 Operation ID'}),button('刷新',onRefresh)));
   const meta=node('div',{class:'operation-meta'},node('p',{class:'code'},op.id),op.created_at?node('p',{},`创建时间：${new Date(op.created_at).toLocaleString('zh-CN')}`):null,op.updated_at?node('p',{},`更新时间：${new Date(op.updated_at).toLocaleString('zh-CN')}`):null);
   const body=node('div',{class:'operation-body'});
-  if(succeeded&&op.result){body.append(node('h4',{},'执行结果'),node('p',{class:'muted'},'核心返回的实际结果；终态为 succeeded。'),raw(op.result));}
-  else if(failed&&op.error){body.append(node('h4',{},'失败原因'),node('p',{class:'muted'},`错误代码：${op.error.code||'UNKNOWN'}`),node('p',{},op.error.message||'操作失败，未返回详细原因。'),op.error.detail?raw(op.error.detail):null);}
-  else if(pending){body.append(node('p',{class:'muted'},'操作已接受，正在执行中。请稍后刷新查询终态。'));}
+  if(succeeded){body.append(node('h4',{},'执行结果'),node('p',{class:'muted'},'核心返回的实际结果；终态为 succeeded。'),raw(op.result));}
+  else if(failed){body.append(node('h4',{},'失败原因'),node('p',{class:'muted'},`错误代码：${op.error?.code||'UNKNOWN'}`),node('p',{},op.error?.message||'操作失败，未返回详细原因。'));}
+  else if(active){body.append(node('p',{class:'muted'},status==='cancel_requested'?'已请求取消；尚未确认终态，请继续查询。':status==='running'?'操作正在执行中。请稍后刷新查询终态。':'操作已接受，等待执行。请稍后刷新查询终态。'));}
+  else if(status==='canceled'){body.append(node('p',{class:'muted'},'操作已取消；终态以核心持久记录为准。'));}
   else{body.append(node('p',{class:'muted'},'状态未知或核心未返回预期的结果/错误字段。'));}
   const toggle=button('查看完整原始 JSON',()=>{const full=card.querySelector('.operation-raw');if(full.hidden){full.hidden=false;toggle.textContent='隐藏原始 JSON';}else{full.hidden=true;toggle.textContent='查看完整原始 JSON';}});
   const rawSection=node('div',{class:'operation-raw',hidden:true},raw(op));
@@ -663,16 +664,15 @@ function operationCard(op,onRefresh) {
 async function tasks(win) {
   const input=node('input',{'aria-label':'Operation UUID',placeholder:'已接受操作的 UUID'});
   const result=node('div');
-  const query=async()=>{
-    const id=input.value.trim();
+  const query=async id=>{
     if(!id){result.replaceChildren(state('error','请输入 Operation UUID','需要一个有效的操作标识符。'));return;}
     result.replaceChildren(state('loading','查询中…'));
     try{
       const response=await request('getOperation',{params:{operation_id:id},signal:win.controller.signal});
-      result.replaceChildren(operationCard(response.data,query));
+      result.replaceChildren(operationCard(response.data,()=>query(id)));
     }catch(error){result.replaceChildren(failure(error));}
   };
-  const queryForm=node('article',{class:'card query-card'},node('h3',{},'查询异步操作'),node('p',{class:'muted'},'输入核心已接受的 Operation UUID，查看其当前状态与终态结果。'),node('div',{class:'inline-field'},input,button('查询',query,{class:'primary'})));
+  const queryForm=node('article',{class:'card query-card'},node('h3',{},'查询异步操作'),node('p',{class:'muted'},'输入核心已接受的 Operation UUID，查看其当前状态与终态结果。'),node('div',{class:'inline-field'},input,button('查询',()=>query(input.value.trim()),{class:'primary'})));
   win.content.replaceChildren(toolbar(win,'任务与能力'),queryForm,result,state('unavailable','Batch / Workflow / 微插件 / 知识库尚不可用','未安装或实现的后续执行系统没有可展示的运行结果。'));
 }
 const apps = [

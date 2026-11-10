@@ -18,6 +18,8 @@ See [deployment and signing](DEPLOYMENT.md) for the actual UID 65532 Lifecycle/s
 
 ## Component verification
 
+Operation browser fixtures also require Python `jsonschema` (CI uses 4.26.0) to validate responses against the checked-in OpenAPI.
+
 Run from the repository root:
 
 ```sh

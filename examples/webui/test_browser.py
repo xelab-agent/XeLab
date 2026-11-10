@@ -406,6 +406,119 @@ class DesktopBrowser(unittest.TestCase):
         self.assertEqual(self.page.evaluate("Object.keys(sessionStorage).filter(key=>key.startsWith('xelab.oauth:')).length"), 0)
         self.assertEqual(self.page.locator('input[type="password"]').count(), 0)
 
+    def operation_query_routes(self, hold_first=False):
+        reads, held = [], []
+        self.page.unroute("**/*")
+        def complete(route, identifier, status=200):
+            value = {"id": identifier, "revision": 1, "created_at": NOW, "updated_at": NOW,
+                     "kind": "createDeployment", "progress_percent": 100, "resource_id": None,
+                     "state": "succeeded", "result": {"id": identifier}, "error": None}
+            if status != 200:
+                value = {"error": {"code": "OLD_FAILURE", "message": "old fixture failure"}}
+            route.fulfill(status=status, headers={"access-control-allow-origin": SHELL},
+                          content_type="application/json", body=json.dumps(value))
+        def route(route):
+            request = route.request
+            url = urlparse(request.url)
+            if (f"{url.scheme}://{url.netloc}" == CORE and request.method == "GET"
+                    and url.path.startswith("/api/platform/v1/operations/")):
+                identifier = url.path.rsplit("/", 1)[1]
+                reads.append(identifier)
+                if hold_first and len(reads) == 1:
+                    held.append((route, identifier))
+                else:
+                    complete(route, identifier)
+            else:
+                self.route(route)
+        self.page.route("**/*", route)
+        return reads, held, complete
+
+    def operation_window(self):
+        self.open()
+        self.page.get_by_role("button", name="打开应用启动器", exact=True).click()
+        self.page.get_by_role("button", name="启动任务与知识库", exact=True).click()
+        return self.page.locator('.window[data-app="tasks"]')
+
+    def track_decoded_operation_response(self, fragment):
+        self.context.add_init_script(f'''(() => {{
+          const original=Response.prototype.arrayBuffer, fragment={json.dumps(fragment)};
+          globalThis.__trackedOperationDecoded=false;
+          Response.prototype.arrayBuffer=async function(...args) {{
+            const bytes=await original.apply(this,args);
+            if(new TextDecoder().decode(bytes).includes(fragment)) globalThis.__trackedOperationDecoded=true;
+            return bytes;
+          }};
+        }})()''')
+
+    def wait_for_tracked_operation_response(self):
+        self.page.wait_for_function("globalThis.__trackedOperationDecoded === true")
+        self.page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+    def test_operation_refresh_targets_the_displayed_operation(self):
+        reads, _, _ = self.operation_query_routes()
+        window = self.operation_window()
+        field = window.get_by_label("Operation UUID")
+        field.fill(ACCOUNT)
+        window.get_by_role("button", name="查询", exact=True).click()
+        expect(window.locator(".operation-card")).to_contain_text(ACCOUNT)
+        field.fill(SKILL)
+        window.locator(".operation-card").get_by_role("button", name="刷新", exact=True).click()
+        window.locator(".operation-card").wait_for()
+        self.assertEqual(reads, [ACCOUNT, ACCOUNT])
+        expect(window.locator(".operation-card")).to_contain_text(ACCOUNT)
+
+    def test_older_operation_response_cannot_replace_a_newer_query(self):
+        self.track_decoded_operation_response('"id": "' + ACCOUNT + '"')
+        reads, held, complete = self.operation_query_routes(hold_first=True)
+        window = self.operation_window()
+        field = window.get_by_label("Operation UUID")
+        field.fill(ACCOUNT)
+        with self.page.expect_request(lambda request: request.url.endswith('/operations/' + ACCOUNT)):
+            window.get_by_role("button", name="查询", exact=True).click()
+        self.assertEqual(len(held), 1)
+        field.fill(SKILL)
+        window.get_by_role("button", name="查询", exact=True).click()
+        expect(window.locator(".operation-card")).to_contain_text(SKILL)
+        complete(*held[0])
+        self.wait_for_tracked_operation_response()
+        expect(window.locator(".operation-card")).to_contain_text(SKILL)
+        self.assertEqual(reads, [ACCOUNT, SKILL])
+
+    def test_older_operation_error_cannot_replace_a_newer_success(self):
+        self.track_decoded_operation_response('"code": "OLD_FAILURE"')
+        reads, held, complete = self.operation_query_routes(hold_first=True)
+        window = self.operation_window()
+        field = window.get_by_label("Operation UUID")
+        field.fill(ACCOUNT)
+        with self.page.expect_request(lambda request: request.url.endswith('/operations/' + ACCOUNT)):
+            window.get_by_role("button", name="查询", exact=True).click()
+        self.assertEqual(len(held), 1)
+        field.fill(SKILL)
+        window.get_by_role("button", name="查询", exact=True).click()
+        expect(window.locator(".operation-card")).to_contain_text(SKILL)
+        complete(*held[0], status=503)
+        self.wait_for_tracked_operation_response()
+        expect(window.locator(".operation-card")).to_contain_text(SKILL)
+        self.assertEqual(reads, [ACCOUNT, SKILL])
+
+    def test_empty_new_query_is_not_replaced_by_an_older_response(self):
+        self.track_decoded_operation_response('"id": "' + ACCOUNT + '"')
+        reads, held, complete = self.operation_query_routes(hold_first=True)
+        window = self.operation_window()
+        field = window.get_by_label("Operation UUID")
+        field.fill(ACCOUNT)
+        with self.page.expect_request(lambda request: request.url.endswith('/operations/' + ACCOUNT)):
+            window.get_by_role("button", name="查询", exact=True).click()
+        self.assertEqual(len(held), 1)
+        field.fill("")
+        window.get_by_role("button", name="查询", exact=True).click()
+        window.get_by_text("请输入 Operation UUID", exact=True).wait_for()
+        complete(*held[0])
+        self.wait_for_tracked_operation_response()
+        window.get_by_text("请输入 Operation UUID", exact=True).wait_for(timeout=3000)
+        self.assertEqual(window.locator(".operation-card").count(), 0)
+        self.assertEqual(reads, [ACCOUNT])
+
     def test_operation_state_and_terminal_fields(self):
         base = {"id": ACCOUNT, "revision": 1, "created_at": NOW, "updated_at": NOW,
                 "kind": "createDeployment", "progress_percent": 100,

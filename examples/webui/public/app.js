@@ -666,16 +666,17 @@ function operationCard(op,onRefresh) {
 async function tasks(win) {
   const input=node('input',{'aria-label':'Operation UUID',placeholder:'已接受操作的 UUID'});
   const result=node('div');
-  const query=async()=>{
-    const id=input.value.trim();
+  let queryVersion=0;
+  const query=async id=>{
+    const version=++queryVersion;
     if(!id){result.replaceChildren(state('error','请输入 Operation UUID','需要一个有效的操作标识符。'));return;}
     result.replaceChildren(state('loading','查询中…'));
     try{
       const response=await request('getOperation',{params:{operation_id:id},signal:win.controller.signal});
-      result.replaceChildren(operationCard(response.data,query));
-    }catch(error){result.replaceChildren(failure(error));}
+      if(version===queryVersion)result.replaceChildren(operationCard(response.data,()=>query(id)));
+    }catch(error){if(version===queryVersion)result.replaceChildren(failure(error));}
   };
-  const queryForm=node('article',{class:'card query-card'},node('h3',{},'查询异步操作'),node('p',{class:'muted'},'输入核心已接受的 Operation UUID，查看其当前状态与终态结果。'),node('div',{class:'inline-field'},input,button('查询',query,{class:'primary'})));
+  const queryForm=node('article',{class:'card query-card'},node('h3',{},'查询异步操作'),node('p',{class:'muted'},'输入核心已接受的 Operation UUID，查看其当前状态与终态结果。'),node('div',{class:'inline-field'},input,button('查询',()=>query(input.value.trim()),{class:'primary'})));
   win.content.replaceChildren(toolbar(win,'任务与能力'),queryForm,result,state('unavailable','Batch / Workflow / 微插件 / 知识库尚不可用','未安装或实现的后续执行系统没有可展示的运行结果。'));
 }
 const apps = [

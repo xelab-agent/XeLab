@@ -59,6 +59,15 @@ class MarkdownLinksTests(unittest.TestCase):
             'broken Markdown link source.md -> missing.md#absent',
         ])
 
+    def test_external_netloc_syntax_cannot_abort_local_link_validation(self):
+        source = self.write('source.md', '''# Present
+[external](https://[)
+[protocol-relative](//[)
+[missing](#absent)
+''')
+        _, errors = check_markdown_links(source, self.root)
+        self.assertEqual(errors, ['broken Markdown anchor source.md -> #absent'])
+
     def test_heading_format_punctuation_unicode_and_duplicate_collision(self):
         anchors = markdown_anchors('''# This'll be a _Helpful_ Section About Θ!
 ## 中文，标点！

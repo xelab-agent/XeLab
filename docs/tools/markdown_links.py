@@ -666,7 +666,15 @@ def check_markdown_links(file, root, anchor_cache=None):
         source = str(file)
     for value in _markdown_links(content):
         target = _unescape_markdown(value)
-        parsed = urlparse(target)
+        # External destinations are out of scope, including ones whose host
+        # syntax urllib refuses before it can return a parsed URL.
+        if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:', target) or target.startswith('//'):
+            continue
+        try:
+            parsed = urlparse(target)
+        except ValueError:
+            errors.append(f'broken Markdown link {source} -> {value}')
+            continue
         if parsed.scheme or parsed.netloc:
             continue
         try:

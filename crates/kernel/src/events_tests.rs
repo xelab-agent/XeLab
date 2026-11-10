@@ -1485,6 +1485,54 @@ fn event_retry_schedule_contract_reaches_sixty_second_ceiling() {
 }
 
 #[tokio::test]
+async fn repro_expired_event_lease_persists_backoff_before_redelivery() {
+    let f = EventFixture::new()
+        .await
+        .expect("this reproduction requires a real test database");
+    let sub = f.subscription("earliest", 10).await;
+    let event = f.publish("expiry-backoff-repro", 1).await;
+    let first = f.next(sub).await.unwrap();
+    let mut c = f.base.app.db.connect().await.unwrap();
+    let tx = c.transaction().await.unwrap();
+    db::auth_lock(&tx, false).await.unwrap();
+    tx.execute(
+        "UPDATE event_deliveries SET lease_expires_at=clock_timestamp()-interval '10 milliseconds' WHERE id=$1",
+        &[&delivery_id(&first)],
+    )
+    .await
+    .unwrap();
+    assert!(
+        lease(&tx, &f.base.app.auth, &f.ctx, sub)
+            .await
+            .unwrap()
+            .is_none(),
+        "a just-expired lease waits for backoff"
+    );
+    let row = tx
+        .query_one(
+            "SELECT state,lease_expires_at,retry_at FROM event_deliveries WHERE id=$1",
+            &[&delivery_id(&first)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("state"), "retry");
+    let expiry: chrono::DateTime<chrono::Utc> = row.get("lease_expires_at");
+    let retry_at: chrono::DateTime<chrono::Utc> = row.get("retry_at");
+    assert!((1000..=1250).contains(&(retry_at - expiry).num_milliseconds()));
+    tx.commit().await.unwrap();
+    c.execute(
+        "UPDATE event_deliveries SET retry_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+        &[&delivery_id(&first)],
+    )
+    .await
+    .unwrap();
+    let second = f.next(sub).await.unwrap();
+    assert_eq!(second["event"]["id"], event["id"]);
+    assert_eq!(second["attempt"], 2);
+    assert_ne!(second["delivery_id"], first["delivery_id"]);
+}
+
+#[tokio::test]
 async fn actual_postgres_event_expired_publisher_waiting_for_storage_fence_cannot_commit() {
     let Some(f) = EventFixture::new().await else {
         return;

@@ -10,6 +10,7 @@ containerd、PostgreSQL 与资源预留有严格前提，本工具在不满足�
 - 只读：PATH 查找、文件读取、stat/access 探测；不创建 cgroup、不启动容器、
   不连接 containerd 或数据库、不修改宿主、不读取环境变量。
 - 普通用户可运行；权限不足/路径缺失逐项报告 `unavailable` 或 `unknown`，绝不假 success。
+- 平台不提供 affinity 接口时报告资源未知或不可用；非 Linux 内核本身报告为不可用。
 - `containerd_socket: detected` 仅表示 socket 存在（未连接），**不代表具备正式执行能力**。
 - `resources.limit_scope` 为 `visible-hierarchy-upper-bound`：现有 `effective_*` 字段仅是可见
   cgroup 层级、affinity 和 MemTotal 的上界；cgroup 命名空间可能隐藏更严格的祖先，采样期间

@@ -89,7 +89,7 @@ def effective_resources(probe):
         memory = int(match.group(1)) * 1024 if match else None
     try:
         cpu = probe.affinity() * 1000
-    except OSError:
+    except (OSError, AttributeError, NotImplementedError):
         cpu = None
     # Host totals are observations, not effective cgroup limits. Even after
     # visible checks, cgroup namespaces can hide more restrictive ancestors.

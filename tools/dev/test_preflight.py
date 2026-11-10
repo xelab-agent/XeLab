@@ -142,6 +142,21 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(resources["state"], "unknown")
         self.assertIsNone(resources["affinity_cpu_millis"])
 
+    def test_missing_platform_affinity_api_reports_safely(self):
+        for has_meminfo, expected in ((True, "unknown"), (False, "unavailable")):
+            with self.subTest(has_meminfo=has_meminfo):
+                probe = healthy(uname=("Darwin", "24.0"))
+                if not has_meminfo:
+                    del probe.files["/proc/meminfo"]
+                probe.affinity = preflight.Probe().affinity
+                with mock.patch.object(preflight.os, "sched_getaffinity", side_effect=AttributeError("not available"), create=True):
+                    code, out, err = call_main(probe, "--json")
+                self.assertEqual((code, err), (0, ""))
+                checks = json.loads(out)["checks"]
+                self.assertEqual(checks["kernel"]["state"], "unavailable")
+                self.assertEqual(checks["resources"]["state"], expected)
+                self.assertIsNone(checks["resources"]["affinity_cpu_millis"])
+
     def test_missing_visible_cgroup_directory_is_not_success(self):
         probe = healthy()
         del probe.files[MEMBER + "/cgroup.controllers"]

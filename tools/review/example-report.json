@@ -6,19 +6,23 @@
   "checks": {
     "check_runs": [
       {
+        "app_id": 1,
         "conclusion": "success",
         "name": "CI",
         "status": "completed",
         "url": "https://github.com/example/project/runs/1"
       },
       {
+        "app_id": 1,
         "conclusion": "failure",
         "name": "Lint",
         "status": "completed",
         "url": "https://github.com/example/project/runs/1"
       }
     ],
-    "combined_status": "failure",
+    "combined_status": "success",
+    "commit_status_history_count": 1,
+    "commit_status_snapshot": "consistent",
     "commit_statuses": [
       {
         "context": "legacy-ci",
@@ -52,10 +56,12 @@
   "required_checks": {
     "checks": [
       {
+        "app_id": 1,
         "name": "CI",
         "state": "passed"
       },
       {
+        "app_id": 1,
         "name": "Docs",
         "state": "missing"
       }
@@ -87,7 +93,7 @@
     ],
     "total": 2
   },
-  "schema": 2,
+  "schema": 3,
   "state": "open",
   "url": "https://github.com/example/project/pull/1"
 }

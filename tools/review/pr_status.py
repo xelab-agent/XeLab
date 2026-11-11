@@ -10,8 +10,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
-SCHEMA = 2
+SCHEMA = 3
 UNSUCCESSFUL = {"failure", "timed_out", "cancelled", "startup_failure", "stale"}
+SUCCESSFUL = {"success", "neutral", "skipped"}
+ACTIVE = {"queued", "in_progress", "waiting", "requested", "pending"}
 THREADS_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
     "repository(owner:$owner,name:$name){pullRequest(number:$number){"
@@ -108,11 +110,30 @@ def classify(checks, statuses, workflows=()):
     if (any(c["status"] == "completed" and c["conclusion"] == "action_required" for c in checks)
             or any(c.get("conclusion") == "action_required" or c.get("status") == "action_required" for c in workflows)):
         return "action-required"
-    if (any(c["status"] != "completed" for c in checks)
-            or any(c["status"] != "completed" for c in workflows)
+    if (any(c["status"] in ACTIVE for c in checks)
+            or any(c["status"] in ACTIVE for c in workflows)
             or any(s["state"] == "pending" for s in statuses)):
         return "pending"
+    if (any(c["status"] != "completed" or c["conclusion"] not in SUCCESSFUL for c in checks)
+            or any(c["status"] != "completed" or c["conclusion"] not in SUCCESSFUL for c in workflows)
+            or any(s["state"] != "success" for s in statuses)):
+        return "unknown"
     return "passed"
+
+
+def latest_statuses(history):
+    # GitHub's status list is reverse chronological across pages. Contexts
+    # are case-insensitive; retain only the first event for each context.
+    latest = {}
+    for status in history:
+        if not isinstance(status["context"], str):
+            raise ValueError("invalid commit status context")
+        latest.setdefault(status["context"].casefold(), status)
+    return list(latest.values())
+
+
+def app_id(value):
+    return value if type(value) is int and value > 0 else None
 
 
 def required_checks(api, base_ref, checks, statuses, workflows=()):
@@ -120,18 +141,65 @@ def required_checks(api, base_ref, checks, statuses, workflows=()):
         protection = api.request("/branches/" + quote(base_ref, safe="") + "/protection")
     except HTTPError:
         return {"state": "unknown"}
-    required = protection.get("required_status_checks") or {}
-    names = sorted({c["context"] for c in required.get("checks", [])} | set(required.get("contexts", [])))
+    if "required_status_checks" not in protection:
+        return {"state": "unknown"}
+    required = protection["required_status_checks"]
+    if required is None:
+        return {"state": "readable", "checks": []}
+    if not isinstance(required, dict) or not ({"checks", "contexts"} & required.keys()):
+        return {"state": "unknown"}
+    if any(required.get(key) is not None and not isinstance(required[key], list) for key in ("checks", "contexts")):
+        return {"state": "unknown"}
+    if not any(isinstance(required.get(key), list) for key in ("checks", "contexts")):
+        return {"state": "unknown"}
+    # Prefer explicit check rules over the legacy contexts mirror. A missing
+    # app_id is not equivalent to -1: GitHub may automatically select an app.
+    rules = []
+    for rule in (required.get("checks") or []):
+        if not isinstance(rule, dict) or not isinstance(rule.get("context"), str):
+            return {"state": "unknown"}
+        source = rule.get("app_id")
+        if source is not None and type(source) is not int:
+            return {"state": "unknown"}
+        rules.append((rule["context"], source))
+    if not all(isinstance(name, str) for name in (required.get("contexts") or [])):
+        return {"state": "unknown"}
+    named = {name for name, _ in rules}
+    rules.extend((name, None) for name in (required.get("contexts") or []) if name not in named)
+    rules = sorted(set(rules), key=lambda item: (item[0], str(item[1])))
     awaiting_approval = any(c.get("conclusion") == "action_required" or c.get("status") == "action_required" for c in workflows)
     results = []
-    for name in names:
+    for name, source in rules:
         matched = [c for c in checks if c["name"] == name]
-        matched_statuses = [s for s in statuses if s["context"] == name]
-        if matched or matched_statuses:
-            state = classify(matched, matched_statuses)
-        else:
+        # Status contexts are explicitly case-insensitive. Check-run name
+        # matching is not documented the same way, so do not claim a pass or
+        # absence when a differently cased check could affect this rule.
+        ambiguous_case = (any(c["name"] != name and c["name"].casefold() == name.casefold() for c in checks)
+                          or any(other != name and other.casefold() == name.casefold() for other, _ in rules))
+        matched_statuses = [s for s in statuses if s["context"].casefold() == name.casefold()]
+        ambiguous_context = not name.isascii() or any(
+            not s["context"].isascii() and s["context"].casefold() == name.casefold()
+            for s in statuses)
+        if ambiguous_case or ambiguous_context:
+            state = "unknown"
+        elif not matched and not matched_statuses:
             state = "action-required" if awaiting_approval else "missing"
-        results.append({"name": name, "state": state})
+        elif source == -1 and type(source) is int:
+            state = classify(matched, matched_statuses)
+        elif app_id(source) is not None:
+            expected = [c for c in matched if c.get("app_id") == source]
+            unidentified = any(c.get("app_id") is None for c in matched)
+            # Commit-status creator is a user identity, not an App ID. If a
+            # same-name status exists, do not infer that its source matches.
+            if unidentified or matched_statuses:
+                state = "unknown"
+            elif expected:
+                state = classify(expected, [])
+            else:
+                state = "action-required" if awaiting_approval else "missing"
+        else:
+            state = "unknown"
+        results.append({"name": name, "app_id": source, "state": state})
     return {"state": "readable", "checks": results}
 
 
@@ -165,11 +233,20 @@ def build_report(api, number):
     head_sha = pr["head"]["sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("unexpected head SHA from GitHub")
-    runs = [{"name": c["name"], "status": c["status"], "conclusion": c["conclusion"], "url": c["html_url"]} for c in check_runs(api, head_sha)]
+    raw_runs = check_runs(api, head_sha)
+    if any(c.get("head_sha") != head_sha for c in raw_runs):
+        raise ValueError("check run head SHA does not match the pull request head")
+    runs = [{"name": c["name"], "status": c["status"], "conclusion": c["conclusion"], "url": c["html_url"],
+             "app_id": app_id(c["app"].get("id")) if isinstance(c.get("app"), dict) else None}
+            for c in raw_runs]
     runs.sort(key=lambda c: (c["name"], c["url"]))
-    statuses = [{"context": s["context"], "state": s["state"], "url": s.get("target_url")} for s in pages(api, f"/commits/{head_sha}/statuses")]
+    status_history = [{"context": s["context"], "state": s["state"], "url": s.get("target_url")} for s in pages(api, f"/commits/{head_sha}/statuses")]
+    statuses = latest_statuses(status_history)
     statuses.sort(key=lambda s: (s["context"], s["url"] or ""))
     combined = api.request(f"/commits/{head_sha}/status")["state"]
+    classic = classify([], statuses)
+    expected_combined = {"none-reported": "pending", "passed": "success", "pending": "pending", "failed": "failure"}.get(classic)
+    statuses_consistent = expected_combined == combined and all(s["context"].isascii() for s in status_history)
     try:
         workflows = workflow_runs(api, head_sha)
         workflow_state = "known"
@@ -187,7 +264,13 @@ def build_report(api, number):
             latest_opinion[review["user"].casefold()] = review
     reviews.sort(key=lambda r: (r["submitted_at"] or "", r["user"], r["state"], r["commit_id"] or ""))
     approvals = [r for r in latest_opinion.values() if r["state"] == "APPROVED"]
+    state = classify(runs, statuses, workflows)
+    if not statuses_consistent:
+        state = "unknown"
     required = required_checks(api, pr["base"]["ref"], runs, statuses, workflows)
+    if not statuses_consistent and required["state"] == "readable":
+        for check in required["checks"]:
+            check["state"] = "unknown"
     threads = review_threads(api, number)
     if identity(api.request(f"/pulls/{number}")) != initial_identity:
         raise ValueError("pull request changed during evidence collection; retry")
@@ -203,11 +286,13 @@ def build_report(api, number):
         "mergeable": pr["mergeable"],
         "mergeable_state": pr["mergeable_state"],
         "checks": {
-            "state": classify(runs, statuses, workflows),
+            "state": state,
             "workflow_runs_state": workflow_state,
             "combined_status": combined,
+            "commit_status_snapshot": "consistent" if statuses_consistent else "unknown",
             "check_runs": runs,
             "commit_statuses": statuses,
+            "commit_status_history_count": len(status_history),
             "workflow_runs": workflows,
         },
         "required_checks": required,
@@ -243,7 +328,7 @@ def render_text(report):
     if required["state"] == "unknown":
         lines.append("required checks: unknown (branch protection unreadable)")
     else:
-        lines.append("required checks: " + (", ".join(f"{c['name']}={c['state']}" for c in required["checks"]) or "none configured"))
+        lines.append("required checks: " + (", ".join(f"{c['name']} (app_id={c['app_id']})={c['state']}" for c in required["checks"]) or "none configured"))
     lines.append(f"reviews: {reviews['total']} total, {reviews['approvals_on_head']} approvals on head, {reviews['approvals_on_older_commits']} on older commits")
     if threads["state"] == "unknown":
         lines.append("review threads: unknown")

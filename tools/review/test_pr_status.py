@@ -29,8 +29,8 @@ PULL = {
 }
 
 
-def run(name="CI", status="completed", conclusion="success"):
-    return {"name": name, "status": status, "conclusion": conclusion, "html_url": "https://github.com/example/project/runs/1"}
+def run(name="CI", status="completed", conclusion="success", head_sha=HEAD):
+    return {"name": name, "status": status, "conclusion": conclusion, "html_url": "https://github.com/example/project/runs/1", "app": {"id": 1}, "head_sha": head_sha}
 
 
 def review(state="APPROVED", commit_id=HEAD, user="reviewer", submitted_at="2026-11-10T00:00:00Z"):
@@ -45,13 +45,20 @@ def workflow(name="CI", status="completed", conclusion="success", head_sha=HEAD,
 
 
 class FakeAPI:
-    def __init__(self, pull=None, runs=(), statuses=(), workflows=(), combined="success", reviews=(), protection=None, threads=None, fail_paths=(), workflow_error=None):
+    def __init__(self, pull=None, runs=(), statuses=(), workflows=(), combined=None, reviews=(), protection=None, threads=None, fail_paths=(), workflow_error=None):
         self.repo = "example/project"
         self.pull = copy.deepcopy(PULL if pull is None else pull)
         self.runs = list(runs)
         self.statuses = list(statuses)
         self.workflows = list(workflows)
         self.workflow_error = workflow_error
+        if combined is None:
+            latest = {}
+            for status in self.statuses:
+                latest.setdefault(status["context"].casefold(), status["state"])
+            values = set(latest.values())
+            combined = ("failure" if values & {"error", "failure"} else
+                        "pending" if not values or "pending" in values else "success")
         self.combined = combined
         self.reviews = list(reviews)
         self.protection = protection
@@ -122,13 +129,20 @@ class ReportTests(unittest.TestCase):
         api = FakeAPI(runs=[run()], reviews=[review()])
         first = build_report(api, 1)
         api.pull["head"]["sha"] = OLD
-        api.runs = [run(name="CI-on-new-head")]
+        api.runs = [run(name="CI-on-new-head", head_sha=OLD)]
         second = build_report(api, 1)
         self.assertEqual(first["reviews"]["approvals_on_head"], 1)
         self.assertEqual(second["reviews"]["approvals_on_head"], 0)
         self.assertEqual(second["reviews"]["approvals_on_older_commits"], 1)
         self.assertIn(("GET", f"/commits/{OLD}/check-runs?per_page=100&page=1"), api.calls)
         self.assertEqual(second["checks"]["check_runs"][0]["name"], "CI-on-new-head")
+
+    def test_mismatched_or_missing_check_head_fails_closed(self):
+        missing = run()
+        missing.pop("head_sha")
+        for item in (run(head_sha=OLD), missing):
+            with self.subTest(item=item), self.assertRaisesRegex(ValueError, "check run head SHA"):
+                build_report(FakeAPI(runs=[item]), 1)
 
     def test_only_read_calls(self):
         api = FakeAPI(runs=[run()], reviews=[review()], threads=lambda cursor: ([], None))
@@ -165,7 +179,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["checks"]["workflow_runs"], [{
             "name": "CI", "event": "pull_request", "status": "completed",
             "conclusion": "action_required", "url": "https://github.com/example/project/actions/runs/1"}])
-        self.assertEqual(report["required_checks"]["checks"], [{"name": "CI", "state": "action-required"}])
+        self.assertEqual(report["required_checks"]["checks"], [{"name": "CI", "app_id": 1, "state": "action-required"}])
         text = render_text(report)
         self.assertIn("workflow CI: completed/action_required", text)
 
@@ -218,7 +232,93 @@ class ReportTests(unittest.TestCase):
     def test_required_checks_missing_and_passed(self):
         protection = {"required_status_checks": {"contexts": ["CI"], "checks": [{"context": "CI", "app_id": 1}, {"context": "Lint", "app_id": 1}]}}
         report = build_report(FakeAPI(runs=[run()], protection=protection), 1)
-        self.assertEqual(report["required_checks"], {"state": "readable", "checks": [{"name": "CI", "state": "passed"}, {"name": "Lint", "state": "missing"}]})
+        self.assertEqual(report["required_checks"], {"state": "readable", "checks": [{"name": "CI", "app_id": 1, "state": "passed"}, {"name": "Lint", "app_id": 1, "state": "missing"}]})
+
+    def test_app_bound_rules_reject_wrong_or_unverifiable_sources(self):
+        protection = {"required_status_checks": {"contexts": ["build"], "checks": [{"context": "build", "app_id": 77}]}}
+        wrong, right, absent = run("build"), run("build"), run("build")
+        wrong["app"] = {"id": 88}
+        right["app"] = {"id": 77}
+        absent.pop("app")
+        status = {"context": "build", "state": "success", "target_url": None, "creator": {"id": 77}}
+        for runs, statuses, expected in [
+            ([wrong], [], "missing"), ([right], [], "passed"),
+            ([absent], [], "unknown"), ([right, absent], [], "unknown"),
+            ([], [status], "unknown"), ([right], [status], "unknown"),
+        ]:
+            with self.subTest(expected=expected, runs=runs, statuses=statuses):
+                report = build_report(FakeAPI(runs=runs, statuses=statuses, protection=protection), 1)
+                self.assertEqual(report["required_checks"]["checks"], [{"name": "build", "app_id": 77, "state": expected}])
+        self.assertEqual(build_report(FakeAPI(runs=[right], protection=protection), 1)["checks"]["check_runs"][0]["app_id"], 77)
+
+    def test_unbound_or_unclear_rule_sources_do_not_guess(self):
+        good = run("build")
+        for rule in ({"context": "build"}, {"context": "build", "app_id": None}, {"context": "build", "app_id": 0}):
+            with self.subTest(rule=rule):
+                protection = {"required_status_checks": {"checks": [rule], "contexts": ["build"]}}
+                self.assertEqual(build_report(FakeAPI(runs=[good], protection=protection), 1)["required_checks"]["checks"][0]["state"], "unknown")
+        self.assertEqual(build_report(FakeAPI(runs=[good], protection={"required_status_checks": {"contexts": ["build"]}}), 1)["required_checks"]["checks"][0]["state"], "unknown")
+        self.assertEqual(build_report(FakeAPI(protection={}), 1)["required_checks"], {"state": "unknown"})
+        self.assertEqual(build_report(FakeAPI(protection={"required_status_checks": None}), 1)["required_checks"], {"state": "readable", "checks": []})
+        self.assertEqual(build_report(FakeAPI(runs=[good], protection={"required_status_checks": {"checks": [{"context": "build", "app_id": True}]}}), 1)["required_checks"], {"state": "unknown"})
+        self.assertEqual(build_report(FakeAPI(protection={"required_status_checks": {"contexts": "build"}}), 1)["required_checks"], {"state": "unknown"})
+        self.assertEqual(build_report(FakeAPI(protection={"required_status_checks": {"contexts": None, "checks": None}}), 1)["required_checks"], {"state": "unknown"})
+
+    def test_any_app_requires_both_same_named_check_and_status(self):
+        protection = {"required_status_checks": {"checks": [{"context": "build", "app_id": -1}]}}
+        success = run("build")
+        failure = run("build", conclusion="failure")
+        status_ok = {"context": "BUILD", "state": "success", "target_url": None}
+        status_bad = {"context": "BUILD", "state": "failure", "target_url": None}
+        for checks, statuses, expected in [([success], [status_bad], "failed"), ([failure], [status_ok], "failed"), ([success], [status_ok], "passed")]:
+            with self.subTest(expected=expected, checks=checks, statuses=statuses):
+                self.assertEqual(build_report(FakeAPI(runs=checks, statuses=statuses, protection=protection), 1)["required_checks"]["checks"][0]["state"], expected)
+
+    def test_latest_status_is_case_insensitive_across_pages(self):
+        newest = {"context": "CI", "state": "success", "target_url": None}
+        old = {"context": "ci", "state": "failure", "target_url": None}
+        filler = [{"context": f"other-{i}", "state": "success", "target_url": None} for i in range(99)]
+        protection = {"required_status_checks": {"checks": [{"context": "ci", "app_id": -1}]}}
+        api = FakeAPI(statuses=[newest, *filler, old], protection=protection)
+        report = build_report(api, 1)
+        self.assertEqual(report["checks"]["state"], "passed")
+        self.assertEqual(report["checks"]["commit_status_history_count"], 101)
+        self.assertEqual(len(report["checks"]["commit_statuses"]), 100)
+        self.assertEqual(report["required_checks"]["checks"][0]["state"], "passed")
+        self.assertIn(("GET", f"/commits/{HEAD}/statuses?per_page=100&page=2"), api.calls)
+        report = build_report(FakeAPI(statuses=[old, newest], protection=protection), 1)
+        self.assertEqual(report["checks"]["state"], "failed")
+        self.assertEqual(report["required_checks"]["checks"][0]["state"], "failed")
+
+    def test_mismatched_or_unknown_status_evidence_never_reports_passed(self):
+        good = run("build")
+        protection = {"required_status_checks": {"checks": [{"context": "build", "app_id": -1}]}}
+        status = {"context": "build", "state": "success", "target_url": None}
+        for statuses, combined in [([status], "failure"), ([status], "pending"), ([], "success")]:
+            with self.subTest(statuses=statuses, combined=combined):
+                r = build_report(FakeAPI(runs=[good], statuses=statuses, combined=combined, protection=protection), 1)
+                self.assertEqual(r["checks"]["state"], "unknown")
+                self.assertEqual(r["checks"]["commit_status_snapshot"], "unknown")
+                self.assertEqual(r["required_checks"]["checks"][0]["state"], "unknown")
+        r = build_report(FakeAPI(runs=[good], combined="pending", protection=protection), 1)
+        self.assertEqual(r["checks"]["state"], "passed")
+        self.assertEqual(r["required_checks"]["checks"][0]["state"], "passed")
+        r = build_report(FakeAPI(combined="failure", protection=protection), 1)
+        self.assertEqual(r["checks"]["state"], "unknown")
+        self.assertEqual(r["required_checks"]["checks"][0]["state"], "unknown")
+
+    def test_undocumented_or_ambiguous_results_are_unknown(self):
+        for bad in [run(status="completed", conclusion=None), run(status="completed", conclusion="future"), run(status="future", conclusion=None)]:
+            self.assertEqual(build_report(FakeAPI(runs=[bad]), 1)["checks"]["state"], "unknown")
+        status = {"context": "ci", "state": "future", "target_url": None}
+        self.assertEqual(build_report(FakeAPI(statuses=[status]), 1)["checks"]["state"], "unknown")
+        non_ascii = {"context": "ß", "state": "success", "target_url": None}
+        r = build_report(FakeAPI(statuses=[non_ascii]), 1)
+        self.assertEqual(r["checks"]["state"], "unknown")
+        protection = {"required_status_checks": {"checks": [{"context": "build", "app_id": -1}]}}
+        self.assertEqual(build_report(FakeAPI(runs=[run("BUILD")], protection=protection), 1)["required_checks"]["checks"][0]["state"], "unknown")
+        conflicting = {"required_status_checks": {"checks": [{"context": "build", "app_id": -1}], "contexts": ["BUILD"]}}
+        self.assertTrue(all(x["state"] == "unknown" for x in build_report(FakeAPI(runs=[run("build")], protection=conflicting), 1)["required_checks"]["checks"]))
 
     def test_stale_approval_counted_separately(self):
         api = FakeAPI(reviews=[review(commit_id=OLD, user="old-reviewer"), review(user="current-reviewer"), review(state="COMMENTED", user="commenter")])

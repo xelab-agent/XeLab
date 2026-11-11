@@ -275,6 +275,37 @@ class ServiceContractTests(ConsumerTestCase):
         self.assertEqual((conflict.status, conflict.code),
                          (409, "IDEMPOTENCY_CONFLICT"))
 
+    def test_acked_lease_cannot_change_outcome_using_a_fresh_key(self):
+        delivery = self.deliver()
+        request = dict(subscription_id=self.subscription,
+                       delivery_id=delivery["delivery_id"],
+                       lease_token=delivery["lease_token"])
+        self.assertEqual(self.service.ack(**request, outcome="ack", idempotency_key="first").status, 204)
+        for outcome in ("retry", "dead_letter"):
+            with self.subTest(outcome=outcome):
+                result = self.service.ack(**request, outcome=outcome, idempotency_key="new-" + outcome)
+                self.assertEqual((result.status, result.code), (409, "STATE_CONFLICT"))
+        replay = self.service.ack(**request, outcome="retry", idempotency_key="first")
+        self.assertEqual((replay.status, replay.code), (409, "IDEMPOTENCY_CONFLICT"))
+
+    def test_earlier_ack_remains_repeatable_after_a_later_event(self):
+        self.service.publish(TOPIC, {"event": "second"}, dedupe_key="second")
+        first = self.deliver()
+        def ack(delivery, key, token=None):
+            return self.service.ack(subscription_id=self.subscription,
+                                    delivery_id=delivery["delivery_id"],
+                                    lease_token=delivery["lease_token"] if token is None else token,
+                                    outcome="ack", idempotency_key=key)
+        self.assertEqual(ack(first, "first").status, 204)
+        second = self.deliver()
+        self.assertEqual(ack(second, "second").status, 204)
+        cursor = self.service.subscriptions[self.subscription]["cursor"]
+        self.service.advance(LEASE_SECONDS + 1)
+        self.assertEqual(ack(first, "first-again").status, 204)
+        self.assertEqual(self.service.subscriptions[self.subscription]["cursor"], cursor)
+        denied = ack(first, "first-wrong-token", token="wrong-token")
+        self.assertEqual((denied.status, denied.code), (409, "STATE_CONFLICT"))
+
     def test_consumer_surfaces_idempotency_conflict_without_replay(self):
         delivery = self.deliver()
         key = self.store.prepare_ack(

@@ -9,6 +9,7 @@ are deterministic; the real platform adds up to 25% jitter (cap 60s).
 """
 
 import hashlib
+import hmac
 import json
 import random
 import uuid
@@ -74,7 +75,9 @@ class FakeEventService:
             "attempt": 0,
             "delivery": None,
             "retry_at": 0.0,
-            "last_acked": None,
+            # The fake retains only token digests for completed ACK leases;
+            # its event and idempotency data are already lifetime-scoped.
+            "acked_leases": {},
         }
         return subscription_id
 
@@ -143,15 +146,18 @@ class FakeEventService:
     def _apply_ack(self, subscription_id, delivery_id, lease_token, outcome):
         sub = self.subscriptions[subscription_id]
         delivery = sub["delivery"]
-        if (delivery_id, lease_token) == sub["last_acked"]:
-            return AckResult(204)
+        previous = sub["acked_leases"].get(delivery_id)
+        if previous is not None:
+            valid_token = isinstance(lease_token, str) and hmac.compare_digest(
+                previous, hashlib.sha256(lease_token.encode("utf-8", "surrogatepass")).digest())
+            return AckResult(204) if valid_token and outcome == "ack" else AckResult(409, "STATE_CONFLICT")
         if delivery is None or delivery["delivery_id"] != delivery_id \
                 or delivery["lease_token"] != lease_token:
             return AckResult(409, "STATE_CONFLICT")
         if self.now >= delivery["expires"]:
             return AckResult(409, "STATE_CONFLICT")
         if outcome == "ack":
-            sub["last_acked"] = (delivery_id, lease_token)
+            sub["acked_leases"][delivery_id] = hashlib.sha256(lease_token.encode("utf-8")).digest()
             self._terminate(sub)
         elif outcome == "dead_letter":
             self._dead_letter(subscription_id, sub, "consumer_dead_letter")
